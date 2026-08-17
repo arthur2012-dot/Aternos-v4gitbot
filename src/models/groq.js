@@ -44,7 +44,6 @@ export class GroqCloudAPI {
     }
 
     async embed(text) {
-        // Groq embedding not used heavily; return null/empty if needed
         return null;
     }
 }

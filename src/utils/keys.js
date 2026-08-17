@@ -2,19 +2,23 @@ import { readFileSync } from 'fs';
 
 let keys = {};
 try {
-    keys = JSON.parse(readFileSync('./keys.json', 'utf8'));
-} catch (e) {
-    console.warn('keys.json not found or invalid, using env vars only');
+    const data = readFileSync('./keys.json', 'utf8');
+    keys = JSON.parse(data);
+} catch (err) {
+    console.warn('keys.json not found. Defaulting to environment variables.');
 }
 
 export function getKey(name) {
-    if (process.env[name]) return process.env[name];
-    if (keys[name]) return keys[name];
-    // common aliases
-    if (name === 'GROQCLOUD_API_KEY' && process.env.GROQ_API_KEY) return process.env.GROQ_API_KEY;
-    return null;
+    let key = keys[name];
+    if (!key) {
+        key = process.env[name];
+    }
+    if (!key) {
+        throw new Error(`API key "${name}" not found in keys.json or environment variables!`);
+    }
+    return key;
 }
 
 export function hasKey(name) {
-    return !!getKey(name);
+    return keys[name] || process.env[name];
 }
