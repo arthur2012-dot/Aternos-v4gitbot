@@ -51,7 +51,7 @@ try {
     console.log('[fetch-base] Base sources already present.');
   }
 
-  // settings re-export
+  // settings re-export at src/settings.js (root settings for main.js)
   try {
     writeFileSync(
       join(ROOT, 'src', 'settings.js'),
@@ -62,7 +62,17 @@ try {
     console.warn('[fetch-base] could not write src/settings.js:', e.message);
   }
 
-  // Vision stubs — MUST run after copy so they overwrite mindcraft files
+  // Official agent settings shape (must export setSettings)
+  writeStub('src/agent/settings.js', `
+let settings = {};
+export default settings;
+export function setSettings(new_settings) {
+    Object.keys(settings).forEach(key => delete settings[key]);
+    Object.assign(settings, new_settings);
+}
+`);
+
+  // Vision stubs
   writeStub('src/agent/vision/browser_viewer.js', `
 export function addBrowserViewer() {}
 export function addViewer() {}
@@ -117,6 +127,13 @@ export class VisionInterpreter {
         console.warn('[fetch-base] patch skipped/already applied:', name);
       }
     }
+  }
+
+  // Bind MindServer publicly for Railway domain
+  try {
+    run(`node "${join(ROOT, 'scripts', 'patch-mindserver.js')}"`);
+  } catch (e) {
+    console.warn('[fetch-base] patch-mindserver failed:', e.message);
   }
 
   console.log('[fetch-base] Ready.');

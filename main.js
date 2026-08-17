@@ -69,7 +69,7 @@ if (process.env.SETTINGS_JSON) {
     }
 }
 
-// host_public=true so Railway healthcheck / public URL can reach mindserver
+// host_public=true + PORT => MindServer binds 0.0.0.0 for Railway domain
 Mindcraft.init(true, settings.mindserver_port, settings.auto_open_ui);
 
 for (let profile of settings.profiles) {
