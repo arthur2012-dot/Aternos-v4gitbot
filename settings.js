@@ -1,0 +1,44 @@
+const settings = {
+    "minecraft_version": "auto",
+    "host": "DarkFantasytxt.aternos.me",
+    "port": 31082,
+    "auth": "offline",
+
+    "mindserver_port": 8081,
+    "auto_open_ui": false,
+    
+    "base_profile": "survival",
+    "profiles": [
+        "./profiles/dream.json"
+    ],
+
+    "load_memory": true,
+    "init_message": "",
+    "only_chat_with": [],
+
+    "speak": false,
+
+    "chat_ingame": true,
+    "language": "en",
+    "render_bot_view": false,
+
+    "allow_insecure_coding": false,
+    "allow_vision": false,
+    "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"],
+    "code_timeout_mins": -1,
+    "relevant_docs_count": 5,
+
+    "max_messages": 15,
+    "num_examples": 2,
+    "max_commands": -1,
+    "show_command_syntax": "full",
+    "narrate_behavior": false,
+    "chat_bot_messages": false,
+
+    "spawn_timeout": 60,
+    "block_place_delay": 80,
+  
+    "log_all_prompts": false,
+};
+
+export default settings;
