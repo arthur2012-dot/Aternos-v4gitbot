@@ -69,7 +69,8 @@ if (process.env.SETTINGS_JSON) {
     }
 }
 
-Mindcraft.init(false, settings.mindserver_port, settings.auto_open_ui);
+// host_public=true so Railway healthcheck / public URL can reach mindserver
+Mindcraft.init(true, settings.mindserver_port, settings.auto_open_ui);
 
 for (let profile of settings.profiles) {
     const profile_json = JSON.parse(readFileSync(profile, 'utf8'));

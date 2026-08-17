@@ -1,5 +1,5 @@
 const settings = {
-    "minecraft_version": "auto",
+    "minecraft_version": "1.21.1",
     "host": "DarkFantasytxt.aternos.me",
     "port": 31082,
     "auth": "offline",
@@ -15,6 +15,7 @@ const settings = {
     "chat_ingame": true,
     "language": "en",
     "render_bot_view": false,
+    "show_bot_views": false,
     "allow_insecure_coding": false,
     "allow_vision": false,
     "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"],

@@ -1,10 +1,10 @@
 /**
- * Clone official mindcraft, apply DreamBot patches.
+ * Clone official mindcraft, apply DreamBot patches, disable heavy viewer.
  * Never hard-crash the whole npm install.
  */
 import { execSync } from 'child_process';
-import { existsSync, cpSync, mkdirSync, rmSync } from 'fs';
-import { join } from 'path';
+import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { join, dirname } from 'path';
 
 const ROOT = process.cwd();
 const TMP = join(ROOT, '.mindcraft-base');
@@ -23,7 +23,7 @@ try {
     } catch (e) {
       console.error('[fetch-base] git clone failed:', e.message);
       console.error('[fetch-base] Make sure git is installed in the build image.');
-      process.exit(0); // soft fail on install; prestart will try again
+      process.exit(0);
     }
 
     for (const part of ['src', 'profiles', 'bots']) {
@@ -42,6 +42,30 @@ try {
     }
   } else {
     console.log('[fetch-base] Base sources already present.');
+  }
+
+  // Always install a NO-OP browser viewer so prismarine-viewer is never required.
+  // Vision/viewer is disabled for Railway (no GPU/canvas, heavy native deps).
+  const viewerPath = join(ROOT, 'src', 'agent', 'vision', 'browser_viewer.js');
+  try {
+    mkdirSync(dirname(viewerPath), { recursive: true });
+    writeFileSync(
+      viewerPath,
+      `// DreamBot: stub — prismarine-viewer disabled on Railway (no canvas/GPU)\n` +
+        `import settings from '../../settings.js';\n\n` +
+        `export function addBrowserViewer(bot, count_id) {\n` +
+        `  if (settings.render_bot_view || settings.show_bot_views) {\n` +
+        `    console.log('[DreamBot] Bot view requested but viewer is disabled in this deploy.');\n` +
+        `  }\n` +
+        `}\n` +
+        `export function addViewer(bot, count_id) {\n` +
+        `  return addBrowserViewer(bot, count_id);\n` +
+        `}\n` +
+        `export default { addBrowserViewer, addViewer };\n`
+    );
+    console.log('[fetch-base] browser_viewer.js stub installed (no prismarine-viewer).');
+  } catch (e) {
+    console.warn('[fetch-base] could not write viewer stub:', e.message);
   }
 
   const patchDir = join(ROOT, 'patches');
