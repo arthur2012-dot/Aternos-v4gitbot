@@ -1,5 +1,5 @@
 /**
- * Clone official mindcraft, apply DreamBot patches, disable heavy viewer.
+ * Clone official mindcraft, apply DreamBot patches, disable heavy viewer/vision.
  * Never hard-crash the whole npm install.
  */
 import { execSync } from 'child_process';
@@ -12,6 +12,13 @@ const NEEDLE = join(ROOT, 'src', 'agent', 'library', 'skills.js');
 
 function run(cmd, opts = {}) {
   execSync(cmd, { stdio: 'inherit', shell: true, ...opts });
+}
+
+function writeStub(relPath, content) {
+  const full = join(ROOT, relPath);
+  mkdirSync(dirname(full), { recursive: true });
+  writeFileSync(full, content);
+  console.log('[fetch-base] stub:', relPath);
 }
 
 try {
@@ -44,7 +51,7 @@ try {
     console.log('[fetch-base] Base sources already present.');
   }
 
-  // Re-export root settings at src/settings.js (mindcraft paths expect it)
+  // settings re-export
   try {
     writeFileSync(
       join(ROOT, 'src', 'settings.js'),
@@ -55,28 +62,47 @@ try {
     console.warn('[fetch-base] could not write src/settings.js:', e.message);
   }
 
-  // Always install a NO-OP browser viewer so prismarine-viewer is never required.
-  const viewerPath = join(ROOT, 'src', 'agent', 'vision', 'browser_viewer.js');
-  try {
-    mkdirSync(dirname(viewerPath), { recursive: true });
-    writeFileSync(
-      viewerPath,
-      `// DreamBot: stub — prismarine-viewer disabled on Railway (no canvas/GPU)\n` +
-        `import settings from '../../../settings.js';\n\n` +
-        `export function addBrowserViewer(bot, count_id) {\n` +
-        `  if (settings.render_bot_view || settings.show_bot_views) {\n` +
-        `    console.log('[DreamBot] Bot view requested but viewer is disabled in this deploy.');\n` +
-        `  }\n` +
-        `}\n` +
-        `export function addViewer(bot, count_id) {\n` +
-        `  return addBrowserViewer(bot, count_id);\n` +
-        `}\n` +
-        `export default { addBrowserViewer, addViewer };\n`
-    );
-    console.log('[fetch-base] browser_viewer.js stub installed (no prismarine-viewer).');
-  } catch (e) {
-    console.warn('[fetch-base] could not write viewer stub:', e.message);
+  // Vision stubs — MUST run after copy so they overwrite mindcraft files
+  writeStub('src/agent/vision/browser_viewer.js', `
+export function addBrowserViewer() {}
+export function addViewer() {}
+export default { addBrowserViewer, addViewer };
+`);
+
+  writeStub('src/agent/vision/camera.js', `
+import { EventEmitter } from 'events';
+export class Camera extends EventEmitter {
+  constructor(bot, fp) {
+    super();
+    this.bot = bot;
+    this.fp = fp;
+    this.disabled = true;
+    setImmediate(() => this.emit('ready'));
   }
+  async capture() {
+    console.log('[DreamBot] Camera capture skipped (vision disabled).');
+    return null;
+  }
+}
+`);
+
+  writeStub('src/agent/vision/vision_interpreter.js', `
+export class VisionInterpreter {
+  constructor(agent, allow_vision) {
+    this.agent = agent;
+    this.allow_vision = false;
+    this.fp = './bots/' + agent.name + '/screenshots/';
+    this.camera = null;
+    if (allow_vision) {
+      console.log('[DreamBot] Vision requested but disabled in this deploy.');
+    }
+  }
+  async lookAtPlayer() { return 'Vision is disabled.'; }
+  async lookAtPosition() { return 'Vision is disabled.'; }
+  getCenterBlockInfo() { return 'No block in center view'; }
+  async analyzeImage() { return 'Vision is disabled.'; }
+}
+`);
 
   const patchDir = join(ROOT, 'patches');
   const patches = ['agent.js.patch', 'modes.js.patch', 'mcdata.js.patch'];
