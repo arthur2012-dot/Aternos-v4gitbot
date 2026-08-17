@@ -1,17 +1,15 @@
 --- src/utils/mcdata.js
 +++ src/utils/mcdata.js
 @@ -2,7 +2,7 @@
+ import settings from '../agent/settings.js';
  import { createBot } from 'mineflayer';
- import { abort } from './util.js';
- import { getKey } from './keys.js';
+ import prismarine_items from 'prismarine-item';
 -import { pathfinder } from 'mineflayer-pathfinder';
 +import { pathfinder, Movements } from 'mineflayer-pathfinder';
- import { pvp } from 'mineflayer-pvp';
- import { collectblock } from 'mineflayer-collectblock';
- import { autoEat } from 'mineflayer-auto-eat';
-@@ -114,6 +114,22 @@
-     bot.loadPlugin(pathfinder);
-     bot.loadPlugin(pvp);
+ import { plugin as pvp } from 'mineflayer-pvp';
+ import { plugin as collectblock } from 'mineflayer-collectblock';
+ import { plugin as autoEat } from 'mineflayer-auto-eat';
+@@ -119,6 +119,22 @@
      bot.loadPlugin(collectblock);
      bot.loadPlugin(autoEat);
      bot.loadPlugin(armorManager); // auto equip armor
@@ -30,3 +28,7 @@
 +            console.warn('[mcdata] could not set human Movements', e.message);
 +        }
 +    });
++
+     bot.once('resourcePack', () => {
+         bot.acceptResourcePack();
+     });
