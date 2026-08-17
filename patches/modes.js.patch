@@ -1,0 +1,102 @@
+--- src/agent/modes.js
++++ src/agent/modes.js
+@@ -293,6 +293,99 @@
+             }
+         }
+     },
++
++    {
++        name: 'player_defense',
++        description: 'Only retaliate against players who attacked you. Never starts PvP.',
++        interrupts: ['all'],
++        on: true,
++        active: false,
++        attacker: null,
++        until: 0,
++        update: async function (agent) {
++            const bot = agent.bot;
++            if (bot.lastDamageTime && Date.now() - bot.lastDamageTime < 2000) {
++                const nearby = world.getNearestEntityWhere(bot, e => e.type === 'player' && e !== bot.entity, 6);
++                if (nearby) {
++                    this.attacker = nearby;
++                    this.until = Date.now() + 15000;
++                }
++            }
++            if (this.attacker && Date.now() < this.until) {
++                const still = world.getNearestEntityWhere(bot, e => e.type === 'player' && (e === this.attacker || e.username === this.attacker.username), 10);
++                if (still && await world.isClearPath(bot, still)) {
++                    execute(this, agent, async () => {
++                        await skills.defendSelf(bot, 8);
++                    });
++                    return;
++                }
++            } else {
++                this.attacker = null;
++            }
++        }
++    },
++    {
++        name: 'return_home',
++        description: 'Return to saved base/home when far or low HP (works without API).',
++        interrupts: ['action:followPlayer'],
++        on: true,
++        active: false,
++        last_check: 0,
++        update: async function (agent) {
++            if (Date.now() - this.last_check < 8000) return;
++            this.last_check = Date.now();
++            if (!agent.isIdle()) return;
++            const place = agent.memory_bank.recallPlace('base') || agent.memory_bank.recallPlace('home');
++            if (!place) return;
++            const bot = agent.bot;
++            const [x, y, z] = place;
++            const dist = bot.entity.position.distanceTo({x, y, z});
++            const lowHp = bot.health < 10;
++            if (dist > 40 || (lowHp && dist > 15)) {
++                execute(this, agent, async () => {
++                    try { await skills.goToPosition(bot, x, y, z, 2); } catch (e) {}
++                });
++            }
++        }
++    },
++    {
++        name: 'friendly_gesture',
++        description: 'Occasional friendly crouch/jump/look to peaceful nearby players.',
++        interrupts: [],
++        on: true,
++        active: false,
++        last: 0,
++        update: async function (agent) {
++            if (Date.now() - this.last < 45000) return;
++            if (!agent.isIdle()) return;
++            const bot = agent.bot;
++            if (bot.lastDamageTime && Date.now() - bot.lastDamageTime < 10000) return;
++            const player = world.getNearestEntityWhere(bot, e => e.type === 'player', 8);
++            if (!player) return;
++            const d = player.position.distanceTo(bot.entity.position);
++            if (d < 1.2 || d > 8) return;
++            this.last = Date.now();
++            execute(this, agent, async () => {
++                try {
++                    await bot.lookAt(player.position.offset(0, player.height || 1.6, 0));
++                    const r = Math.random();
++                    if (r < 0.4) {
++                        bot.setControlState('sneak', true);
++                        await new Promise(res => setTimeout(res, 600));
++                        bot.setControlState('sneak', false);
++                    } else if (r < 0.75) {
++                        bot.setControlState('jump', true);
++                        await new Promise(res => setTimeout(res, 200));
++                        bot.setControlState('jump', false);
++                        await new Promise(res => setTimeout(res, 250));
++                        bot.setControlState('jump', true);
++                        await new Promise(res => setTimeout(res, 200));
++                        bot.setControlState('jump', false);
++                    }
++                } catch (e) {}
++            });
++        }
++    },
+     {
+         name: 'cheat',
+         description: 'Use cheats to instantly place blocks and teleport.',
