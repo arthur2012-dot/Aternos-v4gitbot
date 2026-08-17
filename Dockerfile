@@ -1,14 +1,16 @@
-FROM node:22-bookworm-slim
+FROM node:20-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV NODE_ENV=production
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    git \
-    python3 \
-    python-is-python3 \
-    build-essential \
-    patch \
+      git \
+      patch \
+      ca-certificates \
+      python3 \
+      python-is-python3 \
+      build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -17,12 +19,11 @@ COPY package.json ./
 COPY scripts ./scripts
 COPY patches ./patches
 
-RUN npm install
+RUN npm install --omit=dev
 
 COPY . .
 
-# Ensure overlays applied after full copy
-RUN node scripts/fetch-base.js || true
+RUN node scripts/fetch-base.js
 
 EXPOSE 8081
 

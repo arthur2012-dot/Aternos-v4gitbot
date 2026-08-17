@@ -1,0 +1,10 @@
+# Force Railway to prefer Dockerfile when present.
+# If Nixpacks is used instead, ensure git+patch exist.
+[phases.setup]
+apts = ["git", "patch", "build-essential", "python3"]
+
+[phases.install]
+cmds = ["npm install --omit=dev"]
+
+[start]
+cmd = "npm start"
