@@ -1,0 +1,13 @@
+node_modules/
+.keys/
+*.log
+.DS_Store
+bots/*/
+!bots/.gitkeep
+!bots/execTemplate.js
+!bots/lintTemplate.js
+.env
+.idea/
+.vscode/
+dist/
+coverage/
