@@ -25,6 +25,8 @@ COPY . .
 
 RUN node scripts/fetch-base.js
 
+# Railway injects PORT; default 8081 for local
+ENV PORT=8081
 EXPOSE 8081
 
 CMD ["npm", "start"]
