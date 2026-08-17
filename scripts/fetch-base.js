@@ -44,15 +44,25 @@ try {
     console.log('[fetch-base] Base sources already present.');
   }
 
+  // Re-export root settings at src/settings.js (mindcraft paths expect it)
+  try {
+    writeFileSync(
+      join(ROOT, 'src', 'settings.js'),
+      "import settings from '../settings.js';\nexport default settings;\n"
+    );
+    console.log('[fetch-base] src/settings.js re-export installed.');
+  } catch (e) {
+    console.warn('[fetch-base] could not write src/settings.js:', e.message);
+  }
+
   // Always install a NO-OP browser viewer so prismarine-viewer is never required.
-  // Vision/viewer is disabled for Railway (no GPU/canvas, heavy native deps).
   const viewerPath = join(ROOT, 'src', 'agent', 'vision', 'browser_viewer.js');
   try {
     mkdirSync(dirname(viewerPath), { recursive: true });
     writeFileSync(
       viewerPath,
       `// DreamBot: stub — prismarine-viewer disabled on Railway (no canvas/GPU)\n` +
-        `import settings from '../../settings.js';\n\n` +
+        `import settings from '../../../settings.js';\n\n` +
         `export function addBrowserViewer(bot, count_id) {\n` +
         `  if (settings.render_bot_view || settings.show_bot_views) {\n` +
         `    console.log('[DreamBot] Bot view requested but viewer is disabled in this deploy.');\n` +

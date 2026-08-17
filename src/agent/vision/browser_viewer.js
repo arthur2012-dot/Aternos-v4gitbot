@@ -1,5 +1,5 @@
 // DreamBot: stub — prismarine-viewer disabled on Railway (no canvas/GPU)
-import settings from '../../settings.js';
+import settings from '../../../settings.js';
 
 export function addBrowserViewer(bot, count_id) {
   if (settings.render_bot_view || settings.show_bot_views) {
