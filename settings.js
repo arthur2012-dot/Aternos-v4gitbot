@@ -1,9 +1,8 @@
 const settings = {
-    "minecraft_version": "1.21.1",
+    "minecraft_version": "1.21.4",
     "host": "DarkFantasytxt.aternos.me",
     "port": 31082,
     "auth": "offline",
-    // Railway sets PORT; mindserver listens here so public URL responds
     "mindserver_port": Number(process.env.PORT) || 8081,
     "auto_open_ui": false,
     "base_profile": "survival",
