@@ -1,0 +1,20 @@
+--- src/agent/agent.js
++++ src/agent/agent.js
+@@ -463,8 +463,15 @@
+             }
+         });
+         this.bot.on('death', () => {
+-            this.actions.cancelResume();
+-            this.actions.stop();
++            console.log('[DreamBot] Death detected — clearing actions and pathfinder.');
++            try { this.actions.cancelResume(); this.actions.stop(); } catch (e) {}
++            try {
++                if (this.bot.pathfinder) {
++                    this.bot.pathfinder.setGoal(null);
++                    this.bot.pathfinder.stop();
++                }
++            } catch (e) {}
++            try { this.bot.clearControlStates(); } catch (e) {}
+         });
+         this.bot.on('kicked', (reason) => {
+             if (!this._disconnectHandled) {

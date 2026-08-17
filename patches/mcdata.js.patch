@@ -1,0 +1,32 @@
+--- src/utils/mcdata.js
++++ src/utils/mcdata.js
+@@ -2,7 +2,7 @@
+ import { createBot } from 'mineflayer';
+ import { abort } from './util.js';
+ import { getKey } from './keys.js';
+-import { pathfinder } from 'mineflayer-pathfinder';
++import { pathfinder, Movements } from 'mineflayer-pathfinder';
+ import { pvp } from 'mineflayer-pvp';
+ import { collectblock } from 'mineflayer-collectblock';
+ import { autoEat } from 'mineflayer-auto-eat';
+@@ -114,6 +114,22 @@
+     bot.loadPlugin(pathfinder);
+     bot.loadPlugin(pvp);
+     bot.loadPlugin(collectblock);
+     bot.loadPlugin(autoEat);
+     bot.loadPlugin(armorManager); // auto equip armor
++
++    bot.once('spawn', () => {
++        try {
++            const movements = new Movements(bot);
++            movements.canDig = true;
++            movements.allowSprinting = true;
++            movements.allowParkour = true;
++            movements.allow1by1towers = true;
++            movements.digCost = 1.2;
++            movements.placeCost = 1.5;
++            bot.pathfinder.setMovements(movements);
++        } catch (e) {
++            console.warn('[mcdata] could not set human Movements', e.message);
++        }
++    });
