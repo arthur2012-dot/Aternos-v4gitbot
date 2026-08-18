@@ -25,15 +25,15 @@ const settings = {
         "!newAction"
     ],
     "code_timeout_mins": -1,
-    "relevant_docs_count": 5,
-    "max_messages": 12,
+    "relevant_docs_count": 3,
+    "max_messages": 8,
     "num_examples": 0,
-    "max_commands": 3,
+    "max_commands": 2,
     "show_command_syntax": "never",
     "narrate_behavior": false,
     "chat_bot_messages": false,
     "spawn_timeout": 120,
-    "block_place_delay": 80,
+    "block_place_delay": 50,
     "log_all_prompts": false,
 };
 export default settings;
