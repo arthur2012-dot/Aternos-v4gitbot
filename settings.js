@@ -2,8 +2,8 @@ const settings = {
     // false = auto-detect version from the server (needs latest mineflayer/protocol)
     "minecraft_version": false,
     "host": "DarkFantasytxt.aternos.me",
-    // Aternos port (check panel if it changes after restart)
-    "port": 31082,
+    // Aternos port
+    "port": 25831,
     "auth": "offline",
     "mindserver_port": Number(process.env.PORT) || 8080,
     "auto_open_ui": false,
