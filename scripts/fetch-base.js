@@ -59,18 +59,9 @@ function softPathfinderPatch(mcPath) {
     else bot.once('spawn', _pfSetup);
 `;
 
-  // Insert after createBot(options)
   if (src.includes('const bot = createBot(options)')) {
     src = src.replace(
       'const bot = createBot(options);',
-      'const bot = createBot(options);' + inject
-    );
-    writeFileSync(mcPath, src);
-    return true;
-  }
-  if (src.includes('createBot(options)')) {
-    src = src.replace(
-      /const bot = createBot\(options\);/,
       'const bot = createBot(options);' + inject
     );
     writeFileSync(mcPath, src);
@@ -191,6 +182,12 @@ try {
     run('node "' + join(ROOT, 'scripts', 'patch-mindserver.js') + '"');
   } catch (e) {
     console.warn('[fetch-base] patch-mindserver failed:', e.message);
+  }
+
+  try {
+    run('node "' + join(ROOT, 'scripts', 'patch-unstuck.js') + '"');
+  } catch (e) {
+    console.warn('[fetch-base] patch-unstuck failed:', e.message);
   }
 
   console.log('[fetch-base] Ready. Forced MC version:', FORCED_VERSION);

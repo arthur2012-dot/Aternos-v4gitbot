@@ -8,8 +8,8 @@ const settings = {
     base_profile: "survival",
     profiles: ["./profiles/dream.json"],
     load_memory: true,
-    // single-quoted outer string avoids SyntaxError with inner quotes
-    init_message: '!selfPrompt("Survive: wood tools food house. Pillar and bridge if stuck. Never say you are a bot. Always next action.")',
+    // empty: avoid "Ola mundo" spam; selfPrompt starts from profile behavior / first chat
+    init_message: "",
     only_chat_with: [],
     speak: false,
     chat_ingame: true,
