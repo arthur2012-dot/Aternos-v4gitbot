@@ -1,7 +1,6 @@
 /**
- * DreamBot fetch-base — critical fix from Mindcraft FAQ/source:
- * modes.execute() calls stopLoop() and kills autonomy. We disable that.
- * init_message forces !collectBlocks on spawn.
+ * DreamBot fetch-base — PathStopped is NOT a crash; swallow it.
+ * Unstuck less aggressive so collectBlocks can finish.
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -75,47 +74,66 @@ function refreshCoreFromUpstream() {
 }
 
 function applyDreamBotFixes() {
-  // ---- MODES: THE REAL BUG — stopLoop kills all tasks ----
+  // MODES
   let modes = read('src/agent/modes.js');
+  // never stopLoop
   if (modes.includes('agent.self_prompter.stopLoop()')) {
     modes = modes.replace(
       /if\s*\(\s*agent\.self_prompter\.isActive\(\)\s*\)\s*\n?\s*agent\.self_prompter\.stopLoop\(\);/,
-      `// DreamBot: DO NOT stop self-prompt when modes run (unstuck/defense was killing all tasks)\n    // if (agent.self_prompter.isActive()) agent.self_prompter.stopLoop();`
+      `// DreamBot: keep self-prompt alive\n    // stopLoop removed`
     );
-    console.log('[fetch-base] modes: removed stopLoop (critical)');
+    console.log('[fetch-base] modes: no stopLoop');
   }
-  // unstuck: no cleanKill
+  // softer unstuck: 45s before trigger (was 20)
+  modes = modes.replace(/max_stuck_time:\s*20/, 'max_stuck_time: 45');
+  // no cleanKill on stuck
   modes = modes.replace(
     /agent\.cleanKill\(["']Got stuck[^"']*["']\)/g,
     `console.warn('[DreamBot] stuck timeout — stay online')`
   );
-  // after mode finishes, restart self-prompt if inactive
+  // resume self-prompt after mode
   if (!modes.includes('[DreamBot] resume self-prompt after mode')) {
     modes = modes.replace(
       /if\s*\(\s*should_reprompt\s*\)\s*\{/,
-      `// [DreamBot] resume self-prompt after mode
-    try {
-      if (agent.self_prompter && !agent.self_prompter.isActive()) {
-        setTimeout(() => {
-          try { agent.self_prompter.start(agent.self_prompter.prompt || 'Collect wood and craft tools. Always use !commands.'); } catch(_){}
-        }, 3000);
-      }
-    } catch(_){}
-    if (should_reprompt) {`
+      `// [DreamBot] resume self-prompt after mode\n    try {\n      if (agent.self_prompter && !agent.self_prompter.isActive()) {\n        setTimeout(() => { try { agent.self_prompter.start(agent.self_prompter.prompt || 'Collect wood !collectBlocks'); } catch(_){} }, 4000);\n      }\n    } catch(_){}\n    if (should_reprompt) {`
     );
   }
   write('src/agent/modes.js', modes);
 
-  // ---- AGENT ----
+  // SKILLS: swallow PathStopped in goToGoal / goto
+  let skills = read('src/agent/library/skills.js');
+  if (!skills.includes('[DreamBot] PathStopped ok')) {
+    // wrap common pathfinder failures
+    skills = skills.replace(
+      /async function goToGoal\(/,
+      `async function goToGoal(`
+    );
+    // After goToGoal function starts, we inject try/catch around pathfinder.goto calls if present
+    if (skills.includes('await bot.pathfinder.goto')) {
+      skills = skills.replace(
+        /await bot\.pathfinder\.goto\(([^)]+)\)/g,
+        `await bot.pathfinder.goto($1).catch(e => { if (/PathStopped|NoPath|Timeout/i.test(String(e?.message||e))) { console.warn('[DreamBot] PathStopped ok'); return; } throw e; })`
+      );
+      console.log('[fetch-base] skills: PathStopped swallowed');
+    }
+    if (skills.includes('goToGoal') && !skills.includes('[DreamBot] sprint')) {
+      skills = skills.replace(
+        /(async function goToGoal\([^)]*\)\s*\{)/,
+        `$1\n    try { bot.setControlState('sprint', true); } catch (_) {} // [DreamBot] sprint\n`
+      );
+    }
+    write('src/agent/library/skills.js', skills);
+  }
+
+  // AGENT
   let agent = read('src/agent/agent.js');
 
-  // Keep Hello world replacement if still present
   if (agent.includes('Hello world! I am')) {
     agent = agent.replace(
       /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/,
       `try {
             if (this.self_prompter && !this.self_prompter.isActive()) {
-                this.self_prompter.start('Collect oak_log with !collectBlocks then craft tools. Always output a !command.');
+                this.self_prompter.start('Collect wood with !collectBlocks. Always use a !command.');
             }
         } catch (e) {}`
     );
@@ -127,7 +145,7 @@ function applyDreamBotFixes() {
       `async openChat(message) {
         const __m = String(message || '');
         if (!__m.trim()) return;
-        if (/groq|rate.?limit|brain disconnected|try again|api key|restarting|exiting|hello world|passivo|indispon/i.test(__m)) {
+        if (/groq|rate.?limit|brain disconnected|try again|api key|restarting|exiting|hello world|PathStopped|passivo/i.test(__m)) {
             console.warn('[DreamBot] suppressed chat:', __m.slice(0, 60));
             return;
         }`
@@ -140,18 +158,16 @@ function applyDreamBotFixes() {
       `cleanKill(msg='Killing agent process...', code=1) {
         console.warn('[DreamBot] cleanKill:', msg, code);
         try { this.history.add('system', msg); this.history.save(); } catch (_) {}
-        if (/stuck|unstuck|not spawned/i.test(String(msg))) return;
+        if (/stuck|unstuck|not spawned|PathStopped/i.test(String(msg))) return;
         process.exit(code);
     }`
     );
   }
 
-  // Spawn: pathfinder + FORCE dig when idle (no LLM needed)
   if (!agent.includes('[DreamBot] idle worker')) {
     agent = agent.replace(
       /this\.bot\.once\('spawn', async \(\) => \{\s*try \{\s*clearTimeout\(spawnTimeout\);/,
       `this.bot.once('spawn', async () => {
-            // Pathfinder movements
             try {
                 const pf = await import('mineflayer-pathfinder');
                 const Movements = pf.Movements || pf.default?.Movements;
@@ -167,7 +183,10 @@ function applyDreamBotFixes() {
                 }
             } catch (e) { console.warn('[DreamBot] pathfinder', e.message); }
 
-            // IDLE WORKER: when nothing running, dig wood or jump-walk (works without Groq)
+            // Ignore PathStopped globally so stack traces don't flood
+            this.bot.on('path_update', () => {});
+            const origEmit = this.bot.emit.bind(this.bot);
+            // Idle worker: dig wood without LLM
             setInterval(async () => {
                 try {
                     const bot = this.bot;
@@ -175,28 +194,23 @@ function applyDreamBotFixes() {
                     if (this.actions?.executing) return;
                     if (bot.pathfinder?.isMoving?.()) return;
                     console.log('[DreamBot] idle worker tick');
-                    // dig any log within 32 blocks via collectBlock skill
-                    try {
-                        const skills = await import('./library/skills.js');
-                        const kinds = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log'];
-                        for (const k of kinds) {
-                            try {
-                                await skills.collectBlock(bot, k, 3);
-                                console.log('[DreamBot] collected', k);
-                                return;
-                            } catch (_) {}
+                    const skills = await import('./library/skills.js');
+                    const kinds = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log'];
+                    for (const k of kinds) {
+                        try {
+                            await skills.collectBlock(bot, k, 2);
+                            console.log('[DreamBot] collected', k);
+                            return;
+                        } catch (e) {
+                            if (!/PathStopped|NoPath/i.test(String(e?.message||e))) {
+                                /* try next */
+                            }
                         }
-                        // dig nearest log raw
-                        const log = bot.findBlock({ matching: b => b && /_log$/i.test(b.name), maxDistance: 16 });
-                        if (log) {
-                            try {
-                                const { goals } = await import('mineflayer-pathfinder');
-                                await bot.pathfinder.goto(new goals.GoalNear(log.position.x, log.position.y, log.position.z, 2));
-                            } catch (_) {}
-                            try { await bot.dig(log); console.log('[DreamBot] dug log'); return; } catch (_) {}
-                        }
-                    } catch (e) { console.warn('[DreamBot] collect fail', e.message); }
-                    // move + jump
+                    }
+                    const log = bot.findBlock({ matching: b => b && /_log$/i.test(b.name), maxDistance: 12 });
+                    if (log) {
+                        try { await bot.dig(log); console.log('[DreamBot] dug log'); return; } catch (_) {}
+                    }
                     bot.setControlState('forward', true);
                     bot.setControlState('sprint', true);
                     bot.setControlState('jump', true);
@@ -205,23 +219,23 @@ function applyDreamBotFixes() {
                             bot.setControlState('jump', false);
                             bot.setControlState('forward', false);
                             bot.setControlState('sprint', false);
-                            bot.look(bot.entity.yaw + 0.6, 0);
+                            bot.look(bot.entity.yaw + 0.7, 0);
                         } catch (_) {}
-                    }, 500);
+                    }, 450);
                 } catch (e) {
-                    console.warn('[DreamBot] idle worker', e.message);
+                    if (!/PathStopped/i.test(String(e?.message||e)))
+                        console.warn('[DreamBot] idle worker', e.message);
                 }
-            }, 15000);
+            }, 18000);
 
-            // Restart self-prompt if dead
             setInterval(() => {
                 try {
                     if (!this.self_prompter) return;
                     if (this.self_prompter.isActive && this.self_prompter.isActive()) return;
                     console.log('[DreamBot] restarting self-prompt');
-                    this.self_prompter.start('Always use a !command. Collect wood: !collectBlocks(\"oak_log\", 5)');
+                    this.self_prompter.start('Collect wood: !collectBlocks(\"oak_log\", 5)');
                 } catch (_) {}
-            }, 50000);
+            }, 55000);
 
             try {
                 clearTimeout(spawnTimeout);`
@@ -231,31 +245,17 @@ function applyDreamBotFixes() {
 
   write('src/agent/agent.js', agent);
 
-  // self_prompter
   let sp = read('src/agent/self_prompter.js');
   sp = sp.replace(/MAX_NO_COMMAND = \d+/, 'MAX_NO_COMMAND = 30');
   if (sp.includes('Stopping auto-prompting')) {
     sp = sp.replace(
       /let out = `Agent did not use command[\s\S]*?this\.state = STOPPED;/,
-      `console.warn('[DreamBot] self-prompt soft pause');
-                    this.state = PAUSED;
-                    setTimeout(() => { try { this.start(this.prompt || 'Collect wood !collectBlocks'); } catch(_){} }, 20000);`
+      `console.warn('[DreamBot] self-prompt soft pause');\n                    this.state = PAUSED;\n                    setTimeout(() => { try { this.start(this.prompt || 'Collect wood'); } catch(_){} }, 20000);`
     );
   }
   sp = sp.replace(/this\.state = STOPPED;/g, 'this.state = PAUSED;');
   write('src/agent/self_prompter.js', sp);
 
-  // skills sprint
-  let skills = read('src/agent/library/skills.js');
-  if (skills.includes('goToGoal') && !skills.includes('[DreamBot] sprint')) {
-    skills = skills.replace(
-      /(async function goToGoal\([^)]*\)\s*\{)/,
-      `$1\n    try { bot.setControlState('sprint', true); } catch (_) {} // [DreamBot] sprint\n`
-    );
-    write('src/agent/library/skills.js', skills);
-  }
-
-  // mcdata version
   let mc = read('src/utils/mcdata.js');
   if (!mc.includes('DreamBot: NEVER delete version')) {
     mc = mc.replace(
@@ -299,7 +299,7 @@ try {
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
   const ms = join(ROOT, 'scripts', 'patch-mindserver.js');
   if (existsSync(ms)) { try { run('node "' + ms + '"'); } catch (_) {} }
-  console.log('[fetch-base] Ready — idle worker + no stopLoop');
+  console.log('[fetch-base] Ready — PathStopped swallowed, soft unstuck');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);
