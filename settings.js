@@ -1,8 +1,7 @@
 const settings = {
-    // false = auto-detect version from the server (needs latest mineflayer/protocol)
-    "minecraft_version": false,
+    // Fixed to match Aternos Paper version (avoids protocol -1 auto-detect failure)
+    "minecraft_version": "1.21.11",
     "host": "DarkFantasytxt.aternos.me",
-    // Aternos port
     "port": 25831,
     "auth": "offline",
     "mindserver_port": Number(process.env.PORT) || 8080,
@@ -34,7 +33,6 @@ const settings = {
 };
 export default settings;
 
-// Expose host/port for the offline-queue waiter (agent_process)
 if (typeof process !== 'undefined') {
     process.env.MC_HOST = process.env.MC_HOST || settings.host;
     process.env.MC_PORT = process.env.MC_PORT || String(settings.port);
