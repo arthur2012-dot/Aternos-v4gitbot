@@ -1,5 +1,5 @@
 /**
- * Progression + house build self-prompt, no Exiting.
+ * Manhunt-style: fast gear self-prompt, mobility, no Exiting.
  */
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -7,19 +7,17 @@ import { join } from 'path';
 const ROOT = process.cwd();
 
 const SELF_PROMPT =
-  'Ordem: 1 tools madeira/pedra 2 CASA: placeBlock paredes chao teto com dirt/cobble/planks 4x4 altura 3, torch, rememberHere base 3 so depois mine iron explore. equip pickaxe pra stone. bridge se buraco. NAO so attack. 2-3 !comandos.';
+  'Manhunt speedrun survival: 1 collect log 2 craft table stick wooden_pickaxe axe sword 3 stone tools furnace torch 4 placeBlock shelter 4x4 + rememberHere base 5 iron ore smelt. Bridge/pillar with placeBlock se gap. NAO idle. NAO so kill mob. equip tool certa. 2-4 !comandos agora.';
 
 function patchAgent() {
   const p = join(ROOT, 'src', 'agent', 'agent.js');
   if (!existsSync(p)) return;
   let src = readFileSync(p, 'utf8');
 
-  src = src.split("this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');").join(
-    '// DreamBot: no Exiting chat'
-  );
+  src = src.split("this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');").join('// DreamBot: no Exiting');
   src = src.replace(
     /this\.bot\.chat\(\s*code\s*>\s*1\s*\?\s*['"]Restarting\.['"]\s*:\s*['"]Exiting\.['"]\s*\)\s*;/g,
-    '// DreamBot: no Exiting chat'
+    '// DreamBot: no Exiting'
   );
   src = src.replace(/this\.bot\.chat\([^)]*Exiting[^)]*\)\s*;/g, '// DreamBot: blocked Exiting');
   src = src.replace(/this\.bot\.chat\([^)]*Restarting[^)]*\)\s*;/g, '// DreamBot: blocked Restarting');
@@ -47,10 +45,7 @@ function patchAgent() {
     }
   }
 
-  if (src.includes('Hello world! I am')) {
-    src = src.replace(
-      /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/g,
-      `try {
+  const injectSelf = `try {
                 if (this.self_prompter && !this.self_prompter.isActive()) {
                     this.self_prompter.start(${JSON.stringify(SELF_PROMPT)});
                 }
@@ -61,7 +56,12 @@ function patchAgent() {
                         this.self_prompter.start(${JSON.stringify(SELF_PROMPT)});
                     }
                 } catch (_) {}
-            }, 40000);`
+            }, 35000);`;
+
+  if (src.includes('Hello world! I am')) {
+    src = src.replace(
+      /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/g,
+      injectSelf
     );
   }
 
@@ -76,14 +76,14 @@ function patchAgent() {
                         this.self_prompter.start(${JSON.stringify(SELF_PROMPT)});
                     }
                 } catch (_) {}
-            }, 2000);
+            }, 1500);
             setInterval(() => {
                 try {
                     if (this.self_prompter && !this.self_prompter.isActive() && this.isIdle && this.isIdle()) {
                         this.self_prompter.start(${JSON.stringify(SELF_PROMPT)});
                     }
                 } catch (_) {}
-            }, 40000);`
+            }, 35000);`
     );
   }
 
@@ -103,6 +103,30 @@ function patchModes() {
   src = src.replace(/say\(agent,\s*"I'm stuck!"\);/g, 'console.log("[DreamBot] unstuck");');
   src = src.replace(/say\(agent,\s*'I\\'m free\.'\);/g, 'console.log("[DreamBot] free");');
   src = src.replace(/say\(agent,\s*"I'm free\."\);/g, 'console.log("[DreamBot] free");');
+
+  // Try inject place on unstuck moveAway
+  if (src.includes('await skills.moveAway(bot, 5)') && !src.includes('DreamBot unstuck place')) {
+    src = src.replace(
+      'await skills.moveAway(bot, 5)',
+      `// DreamBot unstuck place
+                    try {
+                        const inv = bot.inventory.items();
+                        const blockItem = inv.find(i =>
+                            /dirt|cobble|plank|netherrack|stone|log|dirt/.test(i.name)
+                        );
+                        if (blockItem) {
+                            await bot.equip(blockItem, 'hand').catch(() => {});
+                            const below = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+                            if (below) await bot.placeBlock(below, { x: 0, y: 1, z: 0 }).catch(() => {});
+                        }
+                        bot.setControlState('jump', true);
+                        await new Promise(r => setTimeout(r, 280));
+                        bot.setControlState('jump', false);
+                    } catch (_) {}
+                    await skills.moveAway(bot, 5)`
+    );
+  }
+
   writeFileSync(p, src);
   console.log('[patch-agent-spawn] modes done');
 }

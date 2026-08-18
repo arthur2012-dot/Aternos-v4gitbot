@@ -34,7 +34,7 @@ const settings = {
     narrate_behavior: false,
     chat_bot_messages: false,
     spawn_timeout: 120,
-    block_place_delay: 20,
+    block_place_delay: 15,
     log_all_prompts: false,
 };
 
