@@ -139,9 +139,10 @@ try {
     ].join('\n')
   );
 
-  // Safe replacements (from stubs/ folder — avoids nested template literal syntax errors)
+  // Safe math/examples + infinite reconnect agent process
   copyStub('stubs/math.js', 'src/utils/math.js');
   copyStub('stubs/examples.js', 'src/utils/examples.js');
+  copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
 
   const patchDir = join(ROOT, 'patches');
   const patches = ['agent.js.patch', 'modes.js.patch', 'mcdata.js.patch'];
