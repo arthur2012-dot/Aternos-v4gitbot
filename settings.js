@@ -1,7 +1,7 @@
 const settings = {
     // false = auto-detect from server (best for Paper 26.1 / 1.21.x)
     // If login fails, set to "1.21.4" or "1.21.11" and lower Aternos version
-    "minecraft_version": false,
+    "minecraft_version": true,
     "host": "DarkFantasytxt.aternos.me",
     "port": 31082,
     "auth": "offline",
