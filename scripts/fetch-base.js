@@ -1,9 +1,5 @@
 /**
- * DreamBot fetch-base (clean):
- * 1) Ensure mindcraft sources exist
- * 2) ALWAYS restore agent.js / modes.js / skills.js from upstream (no permanent corruption)
- * 3) Apply only unified-diff patches (patch -p0)
- * 4) Stubs for vision + settings reexports
+ * Clean fetch-base: restore core files from mindcraft, apply unified patches only.
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -28,16 +24,13 @@ function writeStub(relPath, content) {
 function copyStub(fromRel, toRel) {
   const from = join(ROOT, fromRel);
   const to = join(ROOT, toRel);
-  if (!existsSync(from)) {
-    console.warn('[fetch-base] missing stub:', fromRel);
-    return;
-  }
+  if (!existsSync(from)) return;
   mkdirSync(dirname(to), { recursive: true });
   writeFileSync(to, readFileSync(from, 'utf8'));
 }
 
 function ensureMindcraftTree() {
-  if (existsSync(NEEDLE) && existsSync(TMP + '/src/agent/agent.js')) {
+  if (existsSync(NEEDLE) && existsSync(join(TMP, 'src', 'agent', 'agent.js'))) {
     console.log('[fetch-base] mindcraft tree present');
     return;
   }
@@ -49,9 +42,7 @@ function ensureMindcraftTree() {
     const to = join(ROOT, part);
     if (!existsSync(from)) continue;
     mkdirSync(to, { recursive: true });
-    try {
-      run('cp -rn "' + from + '/." "' + to + '/" 2>/dev/null || true');
-    } catch (_) {}
+    try { run('cp -rn "' + from + '/." "' + to + '/" 2>/dev/null || true'); } catch (_) {}
   }
   if (!existsSync(join(ROOT, 'main.js'))) {
     cpSync(join(TMP, 'main.js'), join(ROOT, 'main.js'));
@@ -59,23 +50,19 @@ function ensureMindcraftTree() {
 }
 
 function refreshCoreFromUpstream() {
-  // Always have a fresh TMP
   if (!existsSync(join(TMP, 'src', 'agent', 'agent.js'))) {
     rmSync(TMP, { recursive: true, force: true });
     run('git clone --depth 1 https://github.com/mindcraft-bots/mindcraft.git "' + TMP + '"');
   }
-  const files = [
+  for (const rel of [
     'src/agent/agent.js',
     'src/agent/modes.js',
     'src/agent/library/skills.js',
-  ];
-  for (const rel of files) {
+    'src/agent/self_prompter.js',
+  ]) {
     const from = join(TMP, rel);
     const to = join(ROOT, rel);
-    if (!existsSync(from)) {
-      console.warn('[fetch-base] missing upstream', rel);
-      continue;
-    }
+    if (!existsSync(from)) continue;
     mkdirSync(dirname(to), { recursive: true });
     cpSync(from, to);
     console.log('[fetch-base] restored', rel);
@@ -84,7 +71,16 @@ function refreshCoreFromUpstream() {
 
 function applyPatches() {
   const patchDir = join(ROOT, 'patches');
-  const list = ['agent.js.patch', 'modes.js.patch', 'skills.js.patch', 'mcdata-version.patch', 'mcdata.js.patch'];
+  // order matters: base agent patch first, then silence openChat
+  const list = [
+    'agent.js.patch',
+    'openchat-silence.patch',
+    'modes.js.patch',
+    'skills.js.patch',
+    'self_prompter.js.patch',
+    'mcdata-version.patch',
+    'mcdata.js.patch',
+  ];
   for (const name of list) {
     const patchFile = join(patchDir, name);
     if (!existsSync(patchFile)) continue;
@@ -92,7 +88,7 @@ function applyPatches() {
       run('cd "' + ROOT + '" && patch -N -r - -p0 < "' + patchFile + '"');
       console.log('[fetch-base] applied', name);
     } catch (e) {
-      console.warn('[fetch-base] patch failed (may already apply):', name, e.message);
+      console.warn('[fetch-base] patch skip:', name, e.message);
     }
   }
 }
@@ -106,10 +102,7 @@ function forceMcVersion() {
     /if\s*\(\s*!mc_version\s*\|\|\s*mc_version\s*===\s*["']auto["']\s*\)\s*\{[^}]*delete\s+options\.version;[^}]*\}/m,
     `// DreamBot: NEVER delete version\n    options.version = options.version || '${FORCED_VERSION}';\n    console.log('[DreamBot] Connecting with version:', options.version);`
   );
-  if (replaced !== src) {
-    writeFileSync(mcPath, replaced);
-    console.log('[fetch-base] forced MC version');
-  }
+  if (replaced !== src) writeFileSync(mcPath, replaced);
 }
 
 try {
@@ -124,10 +117,7 @@ try {
   applyPatches();
   forceMcVersion();
 
-  writeFileSync(
-    join(ROOT, 'src', 'settings.js'),
-    "import settings from '../settings.js';\nexport default settings;\n"
-  );
+  writeFileSync(join(ROOT, 'src', 'settings.js'), "import settings from '../settings.js';\nexport default settings;\n");
 
   writeStub(
     'src/agent/settings.js',
@@ -145,30 +135,18 @@ try {
     ].join('\n')
   );
 
-  writeStub(
-    'src/agent/vision/browser_viewer.js',
-    'export function addBrowserViewer() {}\nexport function addViewer() {}\nexport default { addBrowserViewer, addViewer };\n'
-  );
-  writeStub(
-    'src/agent/vision/camera.js',
-    "import { EventEmitter } from 'events';\nexport class Camera extends EventEmitter {\n  constructor(bot, fp) { super(); this.bot = bot; this.fp = fp; this.disabled = true; setImmediate(() => this.emit('ready')); }\n  async capture() { return null; }\n}\n"
-  );
-  writeStub(
-    'src/agent/vision/vision_interpreter.js',
-    "export class VisionInterpreter {\n  constructor(agent) { this.agent = agent; this.allow_vision = false; this.camera = null; }\n  async lookAtPlayer() { return 'Vision disabled'; }\n  async lookAtPosition() { return 'Vision disabled'; }\n  getCenterBlockInfo() { return 'No block'; }\n  async analyzeImage() { return 'Vision disabled'; }\n}\n"
-  );
+  writeStub('src/agent/vision/browser_viewer.js', 'export function addBrowserViewer() {}\nexport function addViewer() {}\nexport default { addBrowserViewer, addViewer };\n');
+  writeStub('src/agent/vision/camera.js', "import { EventEmitter } from 'events';\nexport class Camera extends EventEmitter {\n  constructor(bot, fp) { super(); this.bot = bot; this.fp = fp; this.disabled = true; setImmediate(() => this.emit('ready')); }\n  async capture() { return null; }\n}\n");
+  writeStub('src/agent/vision/vision_interpreter.js', "export class VisionInterpreter {\n  constructor(agent) { this.agent = agent; this.allow_vision = false; this.camera = null; }\n  async lookAtPlayer() { return 'Vision disabled'; }\n  async lookAtPosition() { return 'Vision disabled'; }\n  getCenterBlockInfo() { return 'No block'; }\n  async analyzeImage() { return 'Vision disabled'; }\n}\n");
 
   copyStub('stubs/math.js', 'src/utils/math.js');
   copyStub('stubs/examples.js', 'src/utils/examples.js');
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
 
-  // mindserver public host (optional small script if present)
   const ms = join(ROOT, 'scripts', 'patch-mindserver.js');
   if (existsSync(ms)) {
-    try {
-      run('node "' + ms + '"');
-    } catch (e) {
-      console.warn('[fetch-base] mindserver patch', e.message);
+    try { run('node "' + ms + '"'); } catch (e) {
+      console.warn('[fetch-base] mindserver', e.message);
     }
   }
 

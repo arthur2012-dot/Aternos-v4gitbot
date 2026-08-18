@@ -22,10 +22,10 @@
 +            setInterval(() => {
 +                try {
 +                    if (this.self_prompter && !this.self_prompter.isActive() && this.isIdle()) {
-+                        this.self_prompter.start('Move, collect, craft tools, place blocks if needed. Sprint. Never only attack.');
++                        this.self_prompter.start('Move, collect wood or stone, craft tools if possible, place blocks if gap. Sprint. Never only attack. Never say bot.');
 +                    }
 +                } catch (_) {}
-+            }, 35000);
++            }, 45000);
 +
              try {
                  clearTimeout(spawnTimeout);

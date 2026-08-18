@@ -1,0 +1,17 @@
+--- src/agent/agent.js
++++ src/agent/agent.js
+@@ -401,6 +401,14 @@
+     }
+ 
+     async openChat(message) {
++        // DreamBot: never spam rate-limit / auto-prompt status into public chat
++        const m = String(message || '');
++        if (/rate.?limit|429|tarifa limitada|modo passivo|did not use command|n[aã]o usou o comando|stopping auto|parando a solicita|brain disconnected|try again/i.test(m)) {
++            console.warn('[DreamBot] suppressed chat:', m.slice(0, 120));
++            return;
++        }
++        if (!m.trim()) return;
++
+         let to_translate = message;
+         let remaining = '';
+         let command_name = containsCommand(message);

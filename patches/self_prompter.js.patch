@@ -1,0 +1,24 @@
+--- src/agent/self_prompter.js
++++ src/agent/self_prompter.js
+@@ -1,7 +1,7 @@
+ import { getCommand, containsCommand } from './commands/index.js';
+ 
+-const MAX_NO_COMMAND = 3;
++const MAX_NO_COMMAND = 8;
+ const STOPPED = 0;
+ const ACTIVE = 1;
+ const PAUSED = 2;
+@@ -68,10 +68,10 @@
+                 no_command_count++;
+                 console.log(`No command, counting: ${no_command_count}`);
+                 if (no_command_count >= MAX_NO_COMMAND) {
+-                    let out = `Agent did not use command in the last ${MAX_NO_COMMAND} auto-prompts. Stopping auto-prompting.`;
+-                    this.agent.openChat(out);
+-                    console.warn(out);
+-                    this.state = STOPPED;
++                    // DreamBot: log only, keep trying later via update() restart
++                    console.warn(`[DreamBot] no command x${MAX_NO_COMMAND} — pause self-prompt (no chat spam)`);
++                    this.state = PAUSED;
+                     break;
+                 }
+             }
