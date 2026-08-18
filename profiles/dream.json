@@ -1,5 +1,5 @@
 {
-    "name": "DreamBot",
+    "name": "DreamBotxt",
     "model": {
         "api": "groq",
         "model": "llama-3.3-70b-versatile"
