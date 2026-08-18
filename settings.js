@@ -8,7 +8,8 @@ const settings = {
     base_profile: "survival",
     profiles: ["./profiles/dream.json"],
     load_memory: true,
-    init_message: "Colete madeira agora. !collectBlocks(\"oak_log\", 8)",
+    // Mindcraft official: system message can include !commands executed on start
+    init_message: "Colete madeira. !collectBlocks(\"oak_log\", 8)",
     only_chat_with: [],
     speak: false,
     chat_ingame: true,
@@ -28,7 +29,7 @@ const settings = {
     ],
     code_timeout_mins: -1,
     relevant_docs_count: 5,
-    max_messages: 5,
+    max_messages: 6,
     num_examples: 0,
     max_commands: 2,
     show_command_syntax: "never",
