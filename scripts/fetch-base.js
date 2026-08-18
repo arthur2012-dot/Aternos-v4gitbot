@@ -1,5 +1,6 @@
 /**
- * Clone mindcraft, DreamBot patches, sprint pathfinder, force MC 1.21.11.
+ * Clone mindcraft, safe patches, force MC 1.21.11.
+ * Order: clone -> restore/patch sprint FIRST if modes broken -> other patches.
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -35,22 +36,17 @@ function copyStub(fromRel, toRel) {
 
 function softPathfinderPatch(mcPath) {
   let src = readFileSync(mcPath, 'utf8');
-  if (src.includes('DreamBot soft pathfinder')) {
-    // still ensure sprint inject once
-  } else {
-    const inject = `
+  if (src.includes('DreamBot soft pathfinder')) return false;
+  const inject = `
     // DreamBot soft pathfinder
     const _pfSetup = () => {
         if (!bot.pathfinder || bot._dreamSoftPath) return;
         bot._dreamSoftPath = true;
         try {
-          const pf = require('mineflayer-pathfinder');
-          const movements = new pf.Movements(bot);
-          movements.canDig = true;
-          movements.allow1by1towers = true;
-          movements.allowParkour = true;
-          movements.allowSprinting = true;
-          bot.pathfinder.setMovements(movements);
+          const pfMod = await import('mineflayer-pathfinder').catch(() => null);
+        } catch (_) {}
+        try {
+          bot.setControlState('sprint', true);
         } catch (_) {}
         const origGoto = bot.pathfinder.goto.bind(bot.pathfinder);
         bot.pathfinder.goto = async (goal) => {
@@ -61,19 +57,37 @@ function softPathfinderPatch(mcPath) {
                 const msg = String(e && (e.message || e.name || e));
                 if (/PathStopped|GoalChanged|path was stopped|goal was changed/i.test(msg)) return;
                 throw e;
-            } finally {
-                try { bot.setControlState('sprint', false); } catch (_) {}
             }
         };
     };
     if (bot.entity) _pfSetup();
     else bot.once('spawn', _pfSetup);
 `;
-    if (src.includes('const bot = createBot(options)')) {
-      src = src.replace('const bot = createBot(options);', 'const bot = createBot(options);' + inject);
-      writeFileSync(mcPath, src);
-      return true;
-    }
+  // avoid await in non-async - simplify inject
+  const inject2 = `
+    // DreamBot soft pathfinder
+    const _pfSetup = () => {
+        if (!bot.pathfinder || bot._dreamSoftPath) return;
+        bot._dreamSoftPath = true;
+        const origGoto = bot.pathfinder.goto.bind(bot.pathfinder);
+        bot.pathfinder.goto = async (goal) => {
+            try {
+                try { bot.setControlState('sprint', true); } catch (_) {}
+                return await origGoto(goal);
+            } catch (e) {
+                const msg = String(e && (e.message || e.name || e));
+                if (/PathStopped|GoalChanged|path was stopped|goal was changed/i.test(msg)) return;
+                throw e;
+            }
+        };
+    };
+    if (bot.entity) _pfSetup();
+    else bot.once('spawn', _pfSetup);
+`;
+  if (src.includes('const bot = createBot(options)')) {
+    src = src.replace('const bot = createBot(options);', 'const bot = createBot(options);' + inject2);
+    writeFileSync(mcPath, src);
+    return true;
   }
   return false;
 }
@@ -136,6 +150,13 @@ try {
   copyStub('stubs/examples.js', 'src/utils/examples.js');
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
 
+  // CRITICAL: fix broken modes.js BEFORE other patches that touch it
+  try {
+    run('node "' + join(ROOT, 'scripts', 'patch-sprint-move.js') + '"');
+  } catch (e) {
+    console.warn('[fetch-base] patch-sprint-move', e.message);
+  }
+
   const patchDir = join(ROOT, 'patches');
   if (existsSync(patchDir)) {
     for (const name of ['agent.js.patch', 'modes.js.patch', 'mcdata.js.patch', 'mcdata-version.patch']) {
@@ -162,7 +183,7 @@ try {
     console.warn('[fetch-base] mcdata failed:', e.message);
   }
 
-  for (const script of ['patch-mindserver.js', 'patch-unstuck.js', 'patch-agent-spawn.js', 'patch-sprint-move.js']) {
+  for (const script of ['patch-mindserver.js', 'patch-unstuck.js', 'patch-agent-spawn.js']) {
     try { run('node "' + join(ROOT, 'scripts', script) + '"'); } catch (e) {
       console.warn('[fetch-base]', script, e.message);
     }
