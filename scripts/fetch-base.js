@@ -33,6 +33,52 @@ function copyStub(fromRel, toRel) {
   console.log('[fetch-base] stub from file:', toRel);
 }
 
+function softPathfinderPatch(mcPath) {
+  let src = readFileSync(mcPath, 'utf8');
+  if (src.includes('DreamBot soft pathfinder')) return false;
+
+  const inject = `
+    // DreamBot soft pathfinder: PathStopped / GoalChanged are normal interrupts, not fatal
+    const _pfSetup = () => {
+        if (!bot.pathfinder || bot._dreamSoftPath) return;
+        bot._dreamSoftPath = true;
+        const origGoto = bot.pathfinder.goto.bind(bot.pathfinder);
+        bot.pathfinder.goto = async (goal) => {
+            try {
+                return await origGoto(goal);
+            } catch (e) {
+                const msg = String(e && (e.message || e.name || e));
+                if (/PathStopped|GoalChanged|path was stopped|goal was changed/i.test(msg)) {
+                    return;
+                }
+                throw e;
+            }
+        };
+    };
+    if (bot.entity) _pfSetup();
+    else bot.once('spawn', _pfSetup);
+`;
+
+  // Insert after createBot(options)
+  if (src.includes('const bot = createBot(options)')) {
+    src = src.replace(
+      'const bot = createBot(options);',
+      'const bot = createBot(options);' + inject
+    );
+    writeFileSync(mcPath, src);
+    return true;
+  }
+  if (src.includes('createBot(options)')) {
+    src = src.replace(
+      /const bot = createBot\(options\);/,
+      'const bot = createBot(options);' + inject
+    );
+    writeFileSync(mcPath, src);
+    return true;
+  }
+  return false;
+}
+
 try {
   try {
     console.log('[fetch-base] Ensuring latest mineflayer stack...');
@@ -84,7 +130,6 @@ try {
       'export function setSettings(new_settings) {',
       '    Object.keys(settings).forEach(key => delete settings[key]);',
       '    Object.assign(settings, new_settings);',
-      "    // DreamBot: never allow empty/auto version",
       "    if (!settings.minecraft_version || settings.minecraft_version === 'auto' || settings.minecraft_version === false) {",
       "        settings.minecraft_version = process.env.MC_VERSION || '1.21.11';",
       '    }',
@@ -122,7 +167,6 @@ try {
     }
   }
 
-  // Nuclear option: rewrite initBot version handling if patch failed
   try {
     const mcPath = join(ROOT, 'src', 'utils', 'mcdata.js');
     if (existsSync(mcPath)) {
@@ -134,6 +178,9 @@ try {
         );
         writeFileSync(mcPath, src);
         console.log('[fetch-base] forced version in mcdata.js');
+      }
+      if (softPathfinderPatch(mcPath)) {
+        console.log('[fetch-base] soft pathfinder patch applied');
       }
     }
   } catch (e) {
