@@ -1,17 +1,16 @@
 const settings = {
-    // true = auto-detect version from server
+    // false = auto-detect version from the server (needs latest mineflayer/protocol)
     "minecraft_version": false,
     "host": "DarkFantasytxt.aternos.me",
-    // If Aternos changes the port after restart, update this value (check Aternos panel)
-    "port": 25831,
+    // Aternos port (check panel if it changes after restart)
+    "port": 31082,
     "auth": "offline",
-    "mindserver_port": Number(process.env.PORT) || 8081,
+    "mindserver_port": Number(process.env.PORT) || 8080,
     "auto_open_ui": false,
     "base_profile": "survival",
     "profiles": ["./profiles/dream.json"],
     "load_memory": true,
     "init_message": "",
-    // empty = talk to everyone (except we keep chat quiet via profile)
     "only_chat_with": [],
     "speak": false,
     "chat_ingame": true,
@@ -29,7 +28,7 @@ const settings = {
     "show_command_syntax": "full",
     "narrate_behavior": false,
     "chat_bot_messages": false,
-    "spawn_timeout": 90,
+    "spawn_timeout": 120,
     "block_place_delay": 80,
     "log_all_prompts": false,
 };

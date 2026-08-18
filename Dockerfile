@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NODE_ENV=production
@@ -15,21 +15,21 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Bust cache when reconnect logic changes
-ARG DREAMBOT_BUILD=2026-08-18-reconnect-v2
+ARG DREAMBOT_BUILD=2026-08-18-mineflayer-latest
 
 COPY package.json ./
 COPY scripts ./scripts
 COPY patches ./patches
 COPY stubs ./stubs
 
-RUN npm install --omit=dev
+RUN npm install --omit=dev && \
+    npm install --omit=dev mineflayer@latest minecraft-protocol@latest minecraft-data@latest
 
 COPY . .
 
 RUN node scripts/fetch-base.js
 
-ENV PORT=8081
-EXPOSE 8081
+ENV PORT=8080
+EXPOSE 8080
 
 CMD ["npm", "start"]

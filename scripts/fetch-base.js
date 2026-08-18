@@ -1,5 +1,6 @@
 /**
  * Clone official mindcraft, apply DreamBot patches, disable heavy viewer/vision.
+ * Force-refresh mineflayer stack so protocol matches newer servers (26.1 / 26.2).
  * Never hard-crash the whole npm install.
  */
 import { execSync } from 'child_process';
@@ -34,6 +35,14 @@ function copyStub(fromRel, toRel) {
 }
 
 try {
+  // Always keep the protocol stack on the newest published versions
+  try {
+    console.log('[fetch-base] Ensuring latest mineflayer / minecraft-protocol / minecraft-data...');
+    run('npm install --omit=dev --no-save mineflayer@latest minecraft-protocol@latest minecraft-data@latest');
+  } catch (e) {
+    console.warn('[fetch-base] could not bump protocol packages:', e.message);
+  }
+
   if (!existsSync(NEEDLE)) {
     console.log('[fetch-base] Cloning mindcraft-bots/mindcraft...');
     try {
@@ -139,7 +148,6 @@ try {
     ].join('\n')
   );
 
-  // Safe math/examples + infinite reconnect agent process
   copyStub('stubs/math.js', 'src/utils/math.js');
   copyStub('stubs/examples.js', 'src/utils/examples.js');
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
