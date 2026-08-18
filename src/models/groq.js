@@ -6,7 +6,8 @@ export class GroqCloudAPI {
     static prefix = 'groq';
 
     constructor(model_name, url, params) {
-        this.model_name = model_name || 'llama-3.3-70b-versatile';
+        // llama-3.3-70b-versatile was shut down 2026-08-16 on free/developer tier
+        this.model_name = model_name || 'openai/gpt-oss-20b';
         this.url = url;
         this.params = params || {};
 
