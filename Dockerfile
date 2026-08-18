@@ -19,7 +19,7 @@ COPY package.json ./
 COPY scripts ./scripts
 COPY patches ./patches
 
-RUN npm install --omit=dev
+RUN npm install--omit=dev
 
 COPY . .
 
