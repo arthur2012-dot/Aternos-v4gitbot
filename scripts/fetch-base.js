@@ -36,9 +36,8 @@ function copyStub(fromRel, toRel) {
 function softPathfinderPatch(mcPath) {
   let src = readFileSync(mcPath, 'utf8');
   if (src.includes('DreamBot soft pathfinder')) return false;
-
   const inject = `
-    // DreamBot soft pathfinder: PathStopped / GoalChanged are normal interrupts, not fatal
+    // DreamBot soft pathfinder
     const _pfSetup = () => {
         if (!bot.pathfinder || bot._dreamSoftPath) return;
         bot._dreamSoftPath = true;
@@ -48,9 +47,7 @@ function softPathfinderPatch(mcPath) {
                 return await origGoto(goal);
             } catch (e) {
                 const msg = String(e && (e.message || e.name || e));
-                if (/PathStopped|GoalChanged|path was stopped|goal was changed/i.test(msg)) {
-                    return;
-                }
+                if (/PathStopped|GoalChanged|path was stopped|goal was changed/i.test(msg)) return;
                 throw e;
             }
         };
@@ -58,12 +55,8 @@ function softPathfinderPatch(mcPath) {
     if (bot.entity) _pfSetup();
     else bot.once('spawn', _pfSetup);
 `;
-
   if (src.includes('const bot = createBot(options)')) {
-    src = src.replace(
-      'const bot = createBot(options);',
-      'const bot = createBot(options);' + inject
-    );
+    src = src.replace('const bot = createBot(options);', 'const bot = createBot(options);' + inject);
     writeFileSync(mcPath, src);
     return true;
   }
@@ -72,33 +65,27 @@ function softPathfinderPatch(mcPath) {
 
 try {
   try {
-    console.log('[fetch-base] Ensuring latest mineflayer stack...');
     run('npm install --omit=dev --no-save mineflayer@latest minecraft-protocol@latest minecraft-data@latest');
   } catch (e) {
-    console.warn('[fetch-base] could not bump protocol packages:', e.message);
+    console.warn('[fetch-base] protocol bump failed:', e.message);
   }
 
   if (!existsSync(NEEDLE)) {
-    console.log('[fetch-base] Cloning mindcraft-bots/mindcraft...');
+    console.log('[fetch-base] Cloning mindcraft...');
     try {
       rmSync(TMP, { recursive: true, force: true });
       run('git clone --depth 1 https://github.com/mindcraft-bots/mindcraft.git "' + TMP + '"');
     } catch (e) {
-      console.error('[fetch-base] git clone failed:', e.message);
+      console.error('[fetch-base] clone failed:', e.message);
       process.exit(0);
     }
-
     for (const part of ['src', 'profiles', 'bots']) {
       const from = join(TMP, part);
       const to = join(ROOT, part);
       if (!existsSync(from)) continue;
-      console.log('[fetch-base] copying', part);
       mkdirSync(to, { recursive: true });
-      try {
-        run('cp -rn "' + from + '/." "' + to + '/" 2>/dev/null || true');
-      } catch (_) {}
+      try { run('cp -rn "' + from + '/." "' + to + '/" 2>/dev/null || true'); } catch (_) {}
     }
-
     if (!existsSync(join(ROOT, 'main.js'))) {
       cpSync(join(TMP, 'main.js'), join(ROOT, 'main.js'));
     }
@@ -107,10 +94,7 @@ try {
   }
 
   try {
-    writeFileSync(
-      join(ROOT, 'src', 'settings.js'),
-      "import settings from '../settings.js';\nexport default settings;\n"
-    );
+    writeFileSync(join(ROOT, 'src', 'settings.js'), "import settings from '../settings.js';\nexport default settings;\n");
   } catch (_) {}
 
   writeStub(
@@ -130,31 +114,19 @@ try {
   );
 
   writeStub('src/agent/vision/browser_viewer.js', 'export function addBrowserViewer() {}\nexport function addViewer() {}\nexport default { addBrowserViewer, addViewer };\n');
-  writeStub(
-    'src/agent/vision/camera.js',
-    "import { EventEmitter } from 'events';\nexport class Camera extends EventEmitter {\n  constructor(bot, fp) { super(); this.bot = bot; this.fp = fp; this.disabled = true; setImmediate(() => this.emit('ready')); }\n  async capture() { return null; }\n}\n"
-  );
-  writeStub(
-    'src/agent/vision/vision_interpreter.js',
-    "export class VisionInterpreter {\n  constructor(agent) { this.agent = agent; this.allow_vision = false; this.camera = null; }\n  async lookAtPlayer() { return 'Vision disabled'; }\n  async lookAtPosition() { return 'Vision disabled'; }\n  getCenterBlockInfo() { return 'No block'; }\n  async analyzeImage() { return 'Vision disabled'; }\n}\n"
-  );
+  writeStub('src/agent/vision/camera.js', "import { EventEmitter } from 'events';\nexport class Camera extends EventEmitter {\n  constructor(bot, fp) { super(); this.bot = bot; this.fp = fp; this.disabled = true; setImmediate(() => this.emit('ready')); }\n  async capture() { return null; }\n}\n");
+  writeStub('src/agent/vision/vision_interpreter.js', "export class VisionInterpreter {\n  constructor(agent) { this.agent = agent; this.allow_vision = false; this.camera = null; }\n  async lookAtPlayer() { return 'Vision disabled'; }\n  async lookAtPosition() { return 'Vision disabled'; }\n  getCenterBlockInfo() { return 'No block'; }\n  async analyzeImage() { return 'Vision disabled'; }\n}\n");
 
   copyStub('stubs/math.js', 'src/utils/math.js');
   copyStub('stubs/examples.js', 'src/utils/examples.js');
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
 
   const patchDir = join(ROOT, 'patches');
-  const patches = ['agent.js.patch', 'modes.js.patch', 'mcdata.js.patch', 'mcdata-version.patch'];
   if (existsSync(patchDir)) {
-    for (const name of patches) {
+    for (const name of ['agent.js.patch', 'modes.js.patch', 'mcdata.js.patch', 'mcdata-version.patch']) {
       const patchFile = join(patchDir, name);
       if (!existsSync(patchFile)) continue;
-      console.log('[fetch-base] applying', name);
-      try {
-        run('cd "' + ROOT + '" && patch -N -r - -p0 < "' + patchFile + '"');
-      } catch (e) {
-        console.warn('[fetch-base] patch skipped/already applied:', name);
-      }
+      try { run('cd "' + ROOT + '" && patch -N -r - -p0 < "' + patchFile + '"'); } catch (_) {}
     }
   }
 
@@ -168,30 +140,21 @@ try {
           `// DreamBot: NEVER delete version\n    options.version = options.version || '${FORCED_VERSION}';\n    console.log('[DreamBot] Connecting with version:', options.version);`
         );
         writeFileSync(mcPath, src);
-        console.log('[fetch-base] forced version in mcdata.js');
       }
-      if (softPathfinderPatch(mcPath)) {
-        console.log('[fetch-base] soft pathfinder patch applied');
-      }
+      softPathfinderPatch(mcPath);
     }
   } catch (e) {
-    console.warn('[fetch-base] mcdata force failed:', e.message);
+    console.warn('[fetch-base] mcdata failed:', e.message);
   }
 
-  try {
-    run('node "' + join(ROOT, 'scripts', 'patch-mindserver.js') + '"');
-  } catch (e) {
-    console.warn('[fetch-base] patch-mindserver failed:', e.message);
+  for (const script of ['patch-mindserver.js', 'patch-unstuck.js', 'patch-agent-spawn.js']) {
+    try { run('node "' + join(ROOT, 'scripts', script) + '"'); } catch (e) {
+      console.warn('[fetch-base]', script, e.message);
+    }
   }
 
-  try {
-    run('node "' + join(ROOT, 'scripts', 'patch-unstuck.js') + '"');
-  } catch (e) {
-    console.warn('[fetch-base] patch-unstuck failed:', e.message);
-  }
-
-  console.log('[fetch-base] Ready. Forced MC version:', FORCED_VERSION);
+  console.log('[fetch-base] Ready.', FORCED_VERSION);
 } catch (e) {
-  console.error('[fetch-base] unexpected error:', e.message);
+  console.error('[fetch-base]', e.message);
   process.exit(0);
 }

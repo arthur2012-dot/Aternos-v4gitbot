@@ -8,7 +8,6 @@ const settings = {
     base_profile: "survival",
     profiles: ["./profiles/dream.json"],
     load_memory: true,
-    // empty: avoid "Ola mundo" spam; selfPrompt starts from profile behavior / first chat
     init_message: "",
     only_chat_with: [],
     speak: false,
