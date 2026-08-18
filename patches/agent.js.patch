@@ -1,76 +1,122 @@
 --- src/agent/agent.js
 +++ src/agent/agent.js
-@@ -107,6 +107,55 @@
+@@ -107,6 +107,95 @@
              process.exit(1);
          }, spawnTimeoutDuration * 1000);
          this.bot.once('spawn', async () => {
-+            // DreamBot passive survival: act WITHOUT Groq when idle
++            // ========== PASSIVE MODE (no Groq needed) ==========
++            // Dig, walk, collect every ~12s even when API is dead
 +            setInterval(async () => {
 +                try {
 +                    const bot = this.bot;
 +                    if (!bot?.entity) return;
 +                    if (this.actions?.executing) return;
-+                    if (bot.lastDamageTime && Date.now() - bot.lastDamageTime < 4000) return;
++                    if (bot.lastDamageTime && Date.now() - bot.lastDamageTime < 3000) return;
++
 +                    const skills = await import('./library/skills.js');
-+                    // pickup drops
++
++                    // 1) Pick up drops
 +                    try { await skills.pickupNearbyItems(bot); } catch (_) {}
-+                    // if low health, stay defensive only
-+                    if (bot.health < 8) {
++
++                    // 2) Low HP → defend only
++                    if (bot.health < 10) {
 +                        try { await skills.defendSelf(bot, 8); } catch (_) {}
 +                        return;
 +                    }
-+                    // collect wood if no pickaxe yet
++
 +                    const inv = bot.inventory.items();
-+                    const hasPick = inv.some(i => i.name.includes('pickaxe'));
-+                    const hasLog = inv.some(i => i.name.includes('log'));
-+                    if (!hasPick) {
++                    const hasPick = inv.some(i => /pickaxe/i.test(i.name));
++                    const hasAxe = inv.some(i => /_axe$/i.test(i.name));
++                    const logCount = inv.filter(i => /_log$/i.test(i.name)).reduce((a, i) => a + i.count, 0);
++
++                    // 3) No wood tools yet → chop ANY nearby log by digging nearest block
++                    if (!hasPick && logCount < 8) {
 +                        try {
-+                            await skills.collectBlock(bot, 'oak_log', 3);
-+                        } catch (_) {
-+                            try { await skills.collectBlock(bot, 'birch_log', 3); } catch (_) {}
-+                            try { await skills.collectBlock(bot, 'spruce_log', 2); } catch (_) {}
++                            // Prefer skill collect
++                            const kinds = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log'];
++                            let done = false;
++                            for (const k of kinds) {
++                                try {
++                                    await skills.collectBlock(bot, k, 2);
++                                    done = true;
++                                    break;
++                                } catch (_) {}
++                            }
++                            if (!done) {
++                                // Fallback: dig nearest log-looking block in range
++                                const block = bot.findBlock({
++                                    matching: (b) => b && /_log$/i.test(b.name),
++                                    maxDistance: 16,
++                                });
++                                if (block) {
++                                    try {
++                                        await bot.pathfinder.goto(new (await import('mineflayer-pathfinder')).goals.GoalNear(block.position.x, block.position.y, block.position.z, 2));
++                                    } catch (_) {}
++                                    try { await bot.dig(block); } catch (_) {}
++                                } else {
++                                    // Walk randomly to find trees
++                                    try { await skills.moveAway(bot, 10); } catch (_) {}
++                                }
++                            }
++                        } catch (e) {
++                            console.warn('[DreamBot] passive wood', e.message);
 +                        }
 +                        return;
 +                    }
-+                    // has tools: mine a bit of stone or move
-+                    try { await skills.collectBlock(bot, 'stone', 5); } catch (_) {
-+                        try { await skills.moveAway(bot, 8); } catch (_) {}
++
++                    // 4) Has tools → mine stone a bit
++                    if (hasPick) {
++                        try {
++                            await skills.collectBlock(bot, 'stone', 4);
++                        } catch (_) {
++                            try { await skills.moveAway(bot, 8); } catch (_) {}
++                        }
++                        return;
 +                    }
++
++                    // 5) Fallback: just move
++                    try { await skills.moveAway(bot, 6); } catch (_) {}
 +                } catch (e) {
 +                    console.warn('[DreamBot] passive loop', e.message);
 +                }
-+            }, 20000);
++            }, 12000);
++
++            // Micro-sprint if frozen
 +            setInterval(() => {
 +                try {
 +                    const bot = this.bot;
 +                    if (!bot?.entity || this.actions?.executing) return;
 +                    const v = bot.entity.velocity;
-+                    if (v && Math.abs(v.x) + Math.abs(v.z) > 0.05) return;
++                    if (v && Math.abs(v.x) + Math.abs(v.z) > 0.04) return;
 +                    bot.setControlState('sprint', true);
 +                    bot.setControlState('forward', true);
 +                    setTimeout(() => {
-+                        try { bot.setControlState('forward', false); bot.setControlState('sprint', false); } catch (_) {}
-+                    }, 700);
++                        try {
++                            bot.setControlState('forward', false);
++                            bot.setControlState('sprint', false);
++                            bot.look(bot.entity.yaw + (Math.random() - 0.5), 0);
++                        } catch (_) {}
++                    }, 800);
 +                } catch (_) {}
-+            }, 18000);
++            }, 15000);
 +
              try {
                  clearTimeout(spawnTimeout);
                  addBrowserViewer(this.bot, count_id);
-@@ -214,7 +263,11 @@
+@@ -214,7 +303,11 @@
              await this.handleMessage('system', init_message, 2);
          }
          else {
 -            this.openChat("Hello world! I am "+this.name);
 +            try {
 +                if (this.self_prompter && !this.self_prompter.isActive()) {
-+                    this.self_prompter.start('Survive quietly: collect craft move. Never talk about Groq or API.');
++                    this.self_prompter.start('Survive: collect wood, craft tools, mine, place blocks. Never mention API.');
 +                }
 +            } catch (e) {}
          }
      }
  
-@@ -529,9 +582,13 @@
+@@ -529,9 +622,13 @@
      
  
      cleanKill(msg='Killing agent process...', code=1) {

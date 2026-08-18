@@ -1,16 +1,21 @@
 --- src/agent/agent.js
 +++ src/agent/agent.js
-@@ -401,6 +401,15 @@
+@@ -401,6 +401,18 @@
      }
  
      async openChat(message) {
 +        // DreamBot: never spam API/status noise into public chat
 +        const m = String(message || '');
-+        if (/groq|rate.?limit|429|tarifa|indispon|passivo|artesanato|did not use command|n[aã]o usou o comando|stopping auto|parando a solicita|brain disconnected|try again|api key|modo pass/i.test(m)) {
-+            console.warn('[DreamBot] suppressed chat:', m.slice(0, 100));
++        if (!m.trim()) return;
++        if (/groq|rate.?limit|429|tarifa|indispon|passivo|passive|artesanato|colete|defenda|explore|did not use command|n[aã]o usou o comando|stopping auto|parando a solicita|brain disconnected|try again|api key|modo pass|continue passive|unavailable|continue passivo/i.test(m)) {
++            console.warn('[DreamBot] suppressed chat:', m.slice(0, 120));
 +            return;
 +        }
-+        if (!m.trim()) return;
++        // Block pure system noise
++        if (/^\s*(restarting|exiting|hello world)/i.test(m)) {
++            console.warn('[DreamBot] suppressed system chat');
++            return;
++        }
 +
          let to_translate = message;
          let remaining = '';
