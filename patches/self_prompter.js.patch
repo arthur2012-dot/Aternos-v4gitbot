@@ -4,11 +4,11 @@
  import { getCommand, containsCommand } from './commands/index.js';
  
 -const MAX_NO_COMMAND = 3;
-+const MAX_NO_COMMAND = 8;
++const MAX_NO_COMMAND = 12;
  const STOPPED = 0;
  const ACTIVE = 1;
  const PAUSED = 2;
-@@ -68,10 +68,10 @@
+@@ -68,10 +68,9 @@
                  no_command_count++;
                  console.log(`No command, counting: ${no_command_count}`);
                  if (no_command_count >= MAX_NO_COMMAND) {
@@ -16,8 +16,7 @@
 -                    this.agent.openChat(out);
 -                    console.warn(out);
 -                    this.state = STOPPED;
-+                    // DreamBot: log only, keep trying later via update() restart
-+                    console.warn(`[DreamBot] no command x${MAX_NO_COMMAND} — pause self-prompt (no chat spam)`);
++                    console.warn('[DreamBot] self-prompt pause (no chat)');
 +                    this.state = PAUSED;
                      break;
                  }
