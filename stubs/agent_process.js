@@ -8,24 +8,18 @@ const require = createRequire(import.meta.url);
 
 /**
  * DreamBot agent process:
- * - Waits patiently when Aternos is offline / starting / in queue
- * - Pings server before joining (no blind login spam)
- * - Long backoff on ban/throttle/protocol errors
+ * - Waits when Aternos is offline/starting (short queue, not hours)
+ * - Pings before join
+ * - Reasonable backoff (no 1 hour waits)
  */
 const STATE_DIR = join(process.cwd(), 'bots');
 const STATE_FILE = join(STATE_DIR, 'reconnect_state.json');
 
 function loadSettings() {
-    try {
-        // settings.js is ESM default export — dynamic import is async; use require via createRequire on a CJS bridge if needed
-        // Fall back to env / defaults
-        return {
-            host: process.env.MC_HOST || 'DarkFantasytxt.aternos.me',
-            port: Number(process.env.MC_PORT) || 31082,
-        };
-    } catch (_) {
-        return { host: 'DarkFantasytxt.aternos.me', port: 31082 };
-    }
+    return {
+        host: process.env.MC_HOST || 'DarkFantasytxt.aternos.me',
+        port: Number(process.env.MC_PORT) || 31082,
+    };
 }
 
 function loadState() {
@@ -90,10 +84,6 @@ function classifyDisconnect(code, signal, recentLogs = '') {
     return 'generic';
 }
 
-/**
- * Ping Aternos. Returns { online, version, players } or { online: false, reason }.
- * Does NOT log in — only status probe.
- */
 function pingServer(host, port, timeoutMs = 8000) {
     return new Promise((resolve) => {
         let settled = false;
@@ -103,9 +93,7 @@ function pingServer(host, port, timeoutMs = 8000) {
             resolve(result);
         };
 
-        const timer = setTimeout(() => {
-            done({ online: false, reason: 'timeout' });
-        }, timeoutMs);
+        const timer = setTimeout(() => done({ online: false, reason: 'timeout' }), timeoutMs);
 
         try {
             const mc = require('minecraft-protocol');
@@ -120,7 +108,6 @@ function pingServer(host, port, timeoutMs = 8000) {
                     version: result?.version?.name || 'unknown',
                     protocol: result?.version?.protocol,
                     players: result?.players,
-                    description: result?.description,
                 });
             });
         } catch (e) {
@@ -141,17 +128,17 @@ export class AgentProcess {
         this._recentStderr = '';
         this._offlineStreak = 0;
 
-        // Offline / queue wait: check every 2–3 min (not aggressive)
-        this.offlineWaitMs = 2 * 60_000; // 2 min between pings when offline
-        this.offlineWaitMaxMs = 5 * 60_000; // up to 5 min if offline a long time
+        // Offline queue: 45s → 90s max (NOT hours)
+        this.offlineWaitMs = 45_000;
+        this.offlineWaitMaxMs = 90_000;
 
-        // After failed join (server was up but login failed)
-        this.minBackoffMs = 60_000;
-        this.maxBackoffMs = 20 * 60_000;
-        this.banPauseMs = 60 * 60_000;
-        this.throttlePauseMs = 15 * 60_000;
-        this.protocolPauseMs = 5 * 60_000;
-        this.maxAttemptsPerHour = 8;
+        // Failed join / kick — still short
+        this.minBackoffMs = 20_000;       // 20s min
+        this.maxBackoffMs = 3 * 60_000;   // 3 min max
+        this.banPauseMs = 5 * 60_000;     // 5 min (was 1 hour — too much)
+        this.throttlePauseMs = 2 * 60_000; // 2 min
+        this.protocolPauseMs = 90_000;    // 90s
+        this.maxAttemptsPerHour = 20;
         this._attemptTimestamps = [];
 
         const s = loadSettings();
@@ -174,51 +161,43 @@ export class AgentProcess {
         const now = Date.now();
 
         if (kind === 'ban' || (state.lastBanAt && now - state.lastBanAt < this.banPauseMs)) {
-            return Math.max(this.banPauseMs - (now - (state.lastBanAt || now)), this.banPauseMs);
+            return Math.max(this.banPauseMs - (now - (state.lastBanAt || now)), 60_000);
         }
         if (kind === 'throttle') return this.throttlePauseMs;
         if (kind === 'offline') {
-            // Patient queue: 2 min, then 3, then 4, max 5
-            const steps = Math.min(this._offlineStreak, 3);
-            return Math.min(this.offlineWaitMs + steps * 60_000, this.offlineWaitMaxMs);
+            // 45s, then 60s, then 90s max
+            const steps = Math.min(this._offlineStreak, 2);
+            return Math.min(this.offlineWaitMs + steps * 15_000, this.offlineWaitMaxMs);
         }
         if (kind === 'protocol') {
             return Math.max(
                 this.protocolPauseMs,
-                Math.min(this.minBackoffMs * Math.pow(1.8, Math.min(this.restartAttempts, 5)), this.maxBackoffMs)
+                Math.min(this.minBackoffMs * Math.pow(1.5, Math.min(this.restartAttempts, 4)), this.maxBackoffMs)
             );
         }
         const exp = Math.min(
-            this.minBackoffMs * Math.pow(1.7, Math.min(this.restartAttempts - 1, 8)),
+            this.minBackoffMs * Math.pow(1.5, Math.min(this.restartAttempts - 1, 6)),
             this.maxBackoffMs
         );
         return Math.max(this.minBackoffMs, exp);
     }
 
-    /**
-     * Wait until Aternos answers ping (server online), then start agent.
-     * This is the "queue" — we only join when the server is actually up.
-     */
     async waitUntilOnline() {
         while (this.shouldRun) {
-            console.log(
-                `[DreamBot] Checking if server is online: ${this.mcHost}:${this.mcPort} ...`
-            );
+            console.log(`[DreamBot] Checking server: ${this.mcHost}:${this.mcPort} ...`);
             const status = await pingServer(this.mcHost, this.mcPort);
 
             if (status.online) {
                 this._offlineStreak = 0;
-                console.log(
-                    `[DreamBot] Server ONLINE (version: ${status.version || '?'}). Joining...`
-                );
+                console.log(`[DreamBot] Server ONLINE (${status.version || '?'}). Joining...`);
                 return status;
             }
 
             this._offlineStreak += 1;
             const wait = this._delayFor('offline');
             console.log(
-                `[DreamBot] Server offline / starting / in queue (${status.reason || 'no response'}). ` +
-                    `Waiting in line ${Math.round(wait / 1000)}s (check #${this._offlineStreak})...`
+                `[DreamBot] Offline / starting (${status.reason || 'no response'}). ` +
+                    `Next check in ${Math.round(wait / 1000)}s (#${this._offlineStreak})`
             );
 
             const state = loadState();
@@ -246,7 +225,6 @@ export class AgentProcess {
             this._restartTimer = null;
         }
 
-        // Always wait for online before spawning the heavy agent process
         this.waitUntilOnline()
             .then((status) => {
                 if (!this.shouldRun || !status) return;
@@ -268,15 +246,13 @@ export class AgentProcess {
         this._recentStderr = '';
 
         if (!this._canAttempt()) {
-            const wait = 30 * 60_000;
-            console.log(
-                `[DreamBot] Too many join attempts this hour. Cooling down ${Math.round(wait / 60000)} min.`
-            );
+            const wait = 5 * 60_000; // 5 min cool-down (was 30)
+            console.log(`[DreamBot] Many joins this hour — pause ${Math.round(wait / 60000)} min.`);
             this._restartTimer = setTimeout(() => {
                 this._restartTimer = null;
                 if (!this.shouldRun) return;
                 this._attemptTimestamps = [];
-                this.start(true, 'Agent reconnect after hourly cool-down.', this.count_id);
+                this.start(true, 'Agent reconnect after cool-down.', this.count_id);
             }, wait);
             return;
         }
@@ -296,7 +272,7 @@ export class AgentProcess {
         if (load_memory) args.push('-l', 'true');
         if (init_message) args.push('-m', init_message);
 
-        console.log('[DreamBot] Starting agent process...');
+        console.log('[DreamBot] Starting agent...');
         const agentProcess = spawn(process.execPath || 'node', args, {
             stdio: ['ignore', 'inherit', 'pipe'],
         });
@@ -344,29 +320,13 @@ export class AgentProcess {
             }
 
             const delay = this._delayFor(kind);
-
-            if (kind === 'offline') {
-                console.log(
-                    `[DreamBot] Server went offline. Back to queue — next check in ${Math.round(delay / 1000)}s.`
-                );
-            } else if (kind === 'ban') {
-                console.log(
-                    `[DreamBot] Possible BAN. Waiting ${Math.round(delay / 60000)} min. Unban DreamBot in Aternos panel if needed.`
-                );
-            } else if (kind === 'throttle') {
-                console.log(`[DreamBot] Throttle suspected. Waiting ${Math.round(delay / 60000)} min.`);
-            } else if (kind === 'protocol') {
-                console.log(`[DreamBot] Protocol issue. Waiting ${Math.round(delay / 60000)} min.`);
-            } else {
-                console.log(
-                    `[DreamBot] Disconnect (${kind}). Retry in ${Math.round(delay / 1000)}s (try ${this.restartAttempts}).`
-                );
-            }
+            console.log(
+                `[DreamBot] ${kind} — retry in ${Math.round(delay / 1000)}s (try ${this.restartAttempts})`
+            );
 
             this._restartTimer = setTimeout(() => {
                 this._restartTimer = null;
                 if (!this.shouldRun) return;
-                // Always go through waitUntilOnline again
                 this.start(true, 'Agent reconnected after disconnect.', this.count_id);
             }, delay);
         });
