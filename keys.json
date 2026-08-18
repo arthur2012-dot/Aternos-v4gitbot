@@ -1,8 +1,8 @@
 {
-    "DEEPSEEK_API_KEY": "sk-d653b6a065ac42a7b52f4eb0b5dd4c92",
+    "GROQCLOUD_API_KEY": "COLE_SUA_KEY_GROQ_AQUI",
+    "DEEPSEEK_API_KEY": "",
     "GEMINI_API_KEY": "",
     "CEREBRAS_API_KEY": "",
-    "GROQCLOUD_API_KEY": "",
     "OPENAI_API_KEY": "",
     "ANTHROPIC_API_KEY": "",
     "OPENROUTER_API_KEY": ""
