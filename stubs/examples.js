@@ -1,0 +1,93 @@
+import { cosineSimilarity } from './math.js';
+import { stringifyTurns, wordOverlapScore } from './text.js';
+
+export class Examples {
+    constructor(model, select_num = 2) {
+        this.examples = [];
+        this.model = model;
+        this.select_num = select_num;
+        this.embeddings = {};
+    }
+
+    turnsToText(turns) {
+        let messages = '';
+        for (let turn of turns) {
+            if (turn.role !== 'assistant')
+                messages += turn.content.substring(turn.content.indexOf(':') + 1).trim() + '\n';
+        }
+        return messages.trim();
+    }
+
+    async load(examples) {
+        this.examples = examples;
+        if (!this.model) return;
+        if (this.select_num === 0) return;
+
+        try {
+            const embeddingPromises = examples.map(example => {
+                const turn_text = this.turnsToText(example);
+                return this.model.embed(turn_text)
+                    .then(embedding => {
+                        if (embedding) this.embeddings[turn_text] = embedding;
+                    })
+                    .catch(() => {});
+            });
+            await Promise.all(embeddingPromises);
+            if (Object.keys(this.embeddings).length === 0) {
+                console.warn('[DreamBot] No embeddings available, using word-overlap.');
+                this.model = null;
+            }
+        } catch (err) {
+            console.warn('Error with embedding model, using word-overlap instead.');
+            this.model = null;
+        }
+    }
+
+    async getRelevant(turns) {
+        if (this.select_num === 0)
+            return [];
+
+        let turn_text = this.turnsToText(turns);
+        try {
+            if (this.model !== null) {
+                let embedding = await this.model.embed(turn_text);
+                if (!embedding) {
+                    this.model = null;
+                } else {
+                    this.examples.sort((a, b) => {
+                        const eb = this.embeddings[this.turnsToText(b)];
+                        const ea = this.embeddings[this.turnsToText(a)];
+                        return cosineSimilarity(embedding, eb) - cosineSimilarity(embedding, ea);
+                    });
+                }
+            }
+            if (this.model === null) {
+                this.examples.sort((a, b) =>
+                    wordOverlapScore(turn_text, this.turnsToText(b)) -
+                    wordOverlapScore(turn_text, this.turnsToText(a))
+                );
+            }
+        } catch (e) {
+            console.warn('[DreamBot] getRelevant failed, returning empty examples:', e.message);
+            return [];
+        }
+        let selected = this.examples.slice(0, this.select_num);
+        return JSON.parse(JSON.stringify(selected));
+    }
+
+    async createExampleMessage(turns) {
+        let selected_examples = await this.getRelevant(turns);
+
+        console.log('selected examples:');
+        for (let example of selected_examples) {
+            console.log('Example:', example[0]?.content);
+        }
+
+        let msg = 'Examples of how to respond:\n';
+        for (let i = 0; i < selected_examples.length; i++) {
+            let example = selected_examples[i];
+            msg += 'Example ' + (i + 1) + ':\n' + stringifyTurns(example) + '\n\n';
+        }
+        return msg;
+    }
+}
