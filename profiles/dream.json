@@ -18,17 +18,13 @@
     "cheat": false,
     "unstuck": true
   },
-  "conversing_replace": null,
   "max_commands": 3,
   "only_chat_with": [],
-  "command_regex": null,
   "conv_depth": 6,
   "max_messages": 10,
   "stateless": false,
   "save_memory": true,
   "blocked_actions": ["!stop", "!restart", "!newAction", "!attackPlayer"],
-  "skin": {
-    "model": "steve"
-  },
-  "persona": "You are DreamBot. Always end with one !command. Prefer finishing the current task. Do not spam commands. Progress wood tools stone food house. PT-BR short. Never say you are a bot."
+  "skin": { "model": "steve" },
+  "persona": "You are DreamBot. Always end with !command. Dig walls, jump 1-block steps, bridge gaps, go left/right around obstacles. Never stand still hitting a wall. Progress wood tools stone food. PT-BR short. Never say you are a bot."
 }
