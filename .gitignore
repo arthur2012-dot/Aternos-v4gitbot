@@ -9,3 +9,7 @@ tmp/
 **/.DS_Store
 src/mindcraft-py/__pycache__/
 src/models/logs/*
+
+# secrets — never commit real keys
+.env
+*.pem

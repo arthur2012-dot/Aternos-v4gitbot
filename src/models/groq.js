@@ -1,26 +1,31 @@
 import Groq from 'groq-sdk';
 import { getKey } from '../utils/keys.js';
 
-// THIS API IS NOT TO BE CONFUSED WITH GROK!
 export class GroqCloudAPI {
     static prefix = 'groq';
 
     constructor(model_name, url, params) {
-        // llama-3.3-70b-versatile was shut down 2026-08-16 on free/developer tier
         this.model_name = model_name || 'openai/gpt-oss-20b';
         this.url = url;
         this.params = params || {};
+        this._cooldownUntil = 0;
 
-        if (this.params.tools)
-            delete this.params.tools;
-
-        if (this.url)
+        if (this.params.tools) delete this.params.tools;
+        if (this.url) {
             console.warn('Groq Cloud has no implementation for custom URLs. Ignoring provided URL.');
+        }
 
         this.groq = new Groq({ apiKey: getKey('GROQCLOUD_API_KEY') });
     }
 
     async sendRequest(turns, systemMessage, stop_seq = null) {
+        const now = Date.now();
+        if (now < this._cooldownUntil) {
+            const wait = Math.ceil((this._cooldownUntil - now) / 1000);
+            console.warn(`[Groq] Cooldown ${wait}s (rate limit). Passive mode.`);
+            return 'Rate limited by Groq. Continuing in passive mode.';
+        }
+
         let messages = [{ role: 'system', content: systemMessage }].concat(turns);
         let res = null;
 
@@ -32,36 +37,43 @@ export class GroqCloudAPI {
                 delete this.params.max_tokens;
             }
             if (!this.params.max_completion_tokens) {
-                this.params.max_completion_tokens = 4000;
+                this.params.max_completion_tokens = 400;
             }
 
-            const completion = await this.groq.chat.completions.create({
-                messages: messages,
+            const request = {
                 model: this.model_name,
+                messages,
                 stream: false,
-                stop: stop_seq,
-                ...(this.params || {}),
-            });
+                ...this.params,
+            };
+            if (stop_seq) request.stop = stop_seq;
 
-            res = completion.choices[0].message.content;
+            const completion = await this.groq.chat.completions.create(request);
+            res = completion.choices[0].message.content || '';
             res = res.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
         } catch (err) {
-            console.error('Groq error:', err.message || err);
-            if (String(err).includes('rate_limit') || String(err).includes('429')) {
-                res = 'Rate limited by Groq. Continuing in passive mode.';
-            } else {
-                res = 'My brain disconnected briefly. I will keep surviving.';
+            const status = err?.status || err?.statusCode;
+            const msg = err?.message || String(err);
+            console.error('Groq error:', status || '', msg);
+
+            if (status === 429 || /rate limit/i.test(msg)) {
+                this._cooldownUntil = Date.now() + 60000;
+                return 'Rate limited by Groq. Continuing in passive mode.';
             }
+            if (status === 401 || status === 403 || /invalid.*api.?key|incorrect.?api.?key/i.test(msg)) {
+                return 'Groq API key invalid or revoked. Update GROQCLOUD_API_KEY in Railway Variables.';
+            }
+            res = 'Groq unavailable, continue passive: collect craft defend explore.';
         }
 
-        return res;
+        return res || 'No response';
     }
 
-    async sendVisionRequest(messages, systemMessage, imageBuffer) {
+    async sendVisionRequest() {
         return 'Vision is disabled in this deploy.';
     }
 
-    async embed(_) {
+    async embed() {
         return null;
     }
 }
