@@ -1,7 +1,5 @@
 /**
- * Clone official mindcraft, apply DreamBot patches, disable heavy viewer/vision.
- * Force-refresh mineflayer stack so protocol matches newer servers (26.1 / 26.2).
- * Never hard-crash the whole npm install.
+ * Clone official mindcraft, apply DreamBot patches, force MC 1.21.11.
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -10,6 +8,7 @@ import { join, dirname } from 'path';
 const ROOT = process.cwd();
 const TMP = join(ROOT, '.mindcraft-base');
 const NEEDLE = join(ROOT, 'src', 'agent', 'library', 'skills.js');
+const FORCED_VERSION = process.env.MC_VERSION || '1.21.11';
 
 function run(cmd, opts = {}) {
   execSync(cmd, { stdio: 'inherit', shell: true, ...opts });
@@ -35,9 +34,8 @@ function copyStub(fromRel, toRel) {
 }
 
 try {
-  // Always keep the protocol stack on the newest published versions
   try {
-    console.log('[fetch-base] Ensuring latest mineflayer / minecraft-protocol / minecraft-data...');
+    console.log('[fetch-base] Ensuring latest mineflayer stack...');
     run('npm install --omit=dev --no-save mineflayer@latest minecraft-protocol@latest minecraft-data@latest');
   } catch (e) {
     console.warn('[fetch-base] could not bump protocol packages:', e.message);
@@ -50,7 +48,6 @@ try {
       run('git clone --depth 1 https://github.com/mindcraft-bots/mindcraft.git "' + TMP + '"');
     } catch (e) {
       console.error('[fetch-base] git clone failed:', e.message);
-      console.error('[fetch-base] Make sure git is installed in the build image.');
       process.exit(0);
     }
 
@@ -77,10 +74,7 @@ try {
       join(ROOT, 'src', 'settings.js'),
       "import settings from '../settings.js';\nexport default settings;\n"
     );
-    console.log('[fetch-base] src/settings.js re-export installed.');
-  } catch (e) {
-    console.warn('[fetch-base] could not write src/settings.js:', e.message);
-  }
+  } catch (_) {}
 
   writeStub(
     'src/agent/settings.js',
@@ -90,62 +84,23 @@ try {
       'export function setSettings(new_settings) {',
       '    Object.keys(settings).forEach(key => delete settings[key]);',
       '    Object.assign(settings, new_settings);',
+      "    // DreamBot: never allow empty/auto version",
+      "    if (!settings.minecraft_version || settings.minecraft_version === 'auto' || settings.minecraft_version === false) {",
+      "        settings.minecraft_version = process.env.MC_VERSION || '1.21.11';",
+      '    }',
       '}',
       ''
     ].join('\n')
   );
 
-  writeStub(
-    'src/agent/vision/browser_viewer.js',
-    [
-      'export function addBrowserViewer() {}',
-      'export function addViewer() {}',
-      'export default { addBrowserViewer, addViewer };',
-      ''
-    ].join('\n')
-  );
-
+  writeStub('src/agent/vision/browser_viewer.js', 'export function addBrowserViewer() {}\nexport function addViewer() {}\nexport default { addBrowserViewer, addViewer };\n');
   writeStub(
     'src/agent/vision/camera.js',
-    [
-      "import { EventEmitter } from 'events';",
-      'export class Camera extends EventEmitter {',
-      '  constructor(bot, fp) {',
-      '    super();',
-      '    this.bot = bot;',
-      '    this.fp = fp;',
-      '    this.disabled = true;',
-      "    setImmediate(() => this.emit('ready'));",
-      '  }',
-      '  async capture() {',
-      "    console.log('[DreamBot] Camera capture skipped (vision disabled).');",
-      '    return null;',
-      '  }',
-      '}',
-      ''
-    ].join('\n')
+    "import { EventEmitter } from 'events';\nexport class Camera extends EventEmitter {\n  constructor(bot, fp) { super(); this.bot = bot; this.fp = fp; this.disabled = true; setImmediate(() => this.emit('ready')); }\n  async capture() { return null; }\n}\n"
   );
-
   writeStub(
     'src/agent/vision/vision_interpreter.js',
-    [
-      'export class VisionInterpreter {',
-      '  constructor(agent, allow_vision) {',
-      '    this.agent = agent;',
-      '    this.allow_vision = false;',
-      "    this.fp = './bots/' + agent.name + '/screenshots/';",
-      '    this.camera = null;',
-      '    if (allow_vision) {',
-      "      console.log('[DreamBot] Vision requested but disabled in this deploy.');",
-      '    }',
-      '  }',
-      "  async lookAtPlayer() { return 'Vision is disabled.'; }",
-      "  async lookAtPosition() { return 'Vision is disabled.'; }",
-      "  getCenterBlockInfo() { return 'No block in center view'; }",
-      "  async analyzeImage() { return 'Vision is disabled.'; }",
-      '}',
-      ''
-    ].join('\n')
+    "export class VisionInterpreter {\n  constructor(agent) { this.agent = agent; this.allow_vision = false; this.camera = null; }\n  async lookAtPlayer() { return 'Vision disabled'; }\n  async lookAtPosition() { return 'Vision disabled'; }\n  getCenterBlockInfo() { return 'No block'; }\n  async analyzeImage() { return 'Vision disabled'; }\n}\n"
   );
 
   copyStub('stubs/math.js', 'src/utils/math.js');
@@ -153,7 +108,7 @@ try {
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
 
   const patchDir = join(ROOT, 'patches');
-  const patches = ['agent.js.patch', 'modes.js.patch', 'mcdata.js.patch'];
+  const patches = ['agent.js.patch', 'modes.js.patch', 'mcdata.js.patch', 'mcdata-version.patch'];
   if (existsSync(patchDir)) {
     for (const name of patches) {
       const patchFile = join(patchDir, name);
@@ -167,13 +122,31 @@ try {
     }
   }
 
+  // Nuclear option: rewrite initBot version handling if patch failed
+  try {
+    const mcPath = join(ROOT, 'src', 'utils', 'mcdata.js');
+    if (existsSync(mcPath)) {
+      let src = readFileSync(mcPath, 'utf8');
+      if (!src.includes('DreamBot: NEVER delete version') && !src.includes('FORCED_VERSION')) {
+        src = src.replace(
+          /if\s*\(\s*!mc_version\s*\|\|\s*mc_version\s*===\s*["']auto["']\s*\)\s*\{[^}]*delete\s+options\.version;[^}]*\}/m,
+          `// DreamBot: NEVER delete version\n    options.version = options.version || '${FORCED_VERSION}';\n    console.log('[DreamBot] Connecting with version:', options.version);`
+        );
+        writeFileSync(mcPath, src);
+        console.log('[fetch-base] forced version in mcdata.js');
+      }
+    }
+  } catch (e) {
+    console.warn('[fetch-base] mcdata force failed:', e.message);
+  }
+
   try {
     run('node "' + join(ROOT, 'scripts', 'patch-mindserver.js') + '"');
   } catch (e) {
     console.warn('[fetch-base] patch-mindserver failed:', e.message);
   }
 
-  console.log('[fetch-base] Ready.');
+  console.log('[fetch-base] Ready. Forced MC version:', FORCED_VERSION);
 } catch (e) {
   console.error('[fetch-base] unexpected error:', e.message);
   process.exit(0);

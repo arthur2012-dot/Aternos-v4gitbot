@@ -1,0 +1,39 @@
+--- src/utils/mcdata.js
++++ src/utils/mcdata.js
+@@ -1,6 +1,8 @@
+ import minecraftData from 'minecraft-data';
+ import settings from '../agent/settings.js';
+ import { createBot } from 'mineflayer';
++// DreamBot: never leave version empty (protocol -1 on Aternos)
++const FORCED_VERSION = process.env.MC_VERSION || '1.21.11';
+ import prismarine_items from 'prismarine-item';
+ import { pathfinder } from 'mineflayer-pathfinder';
+ import { plugin as pvp } from 'mineflayer-pvp';
+@@ -20,7 +22,8 @@
+ const armorManager = plugin;
+ let mc_version = settings.minecraft_version;
+ let mcdata = null;
+ let Item = null;
++
+if (!mc_version || mc_version === 'auto' || mc_version === false) mc_version = FORCED_VERSION;
+ 
+ /**
+  * @typedef {string} ItemName
+@@ -40,12 +43,14 @@
+ export function initBot(username) {
+     const options = {
+         username: username,
+         host: settings.host,
+         port: settings.port,
+         auth: settings.auth,
+-        version: mc_version,
++        version: (mc_version && mc_version !== 'auto') ? mc_version : FORCED_VERSION,
+         checkTimeoutInterval: 60000,  // 60s keep-alive check (default 30s) — reduces disconnects on slow servers
+     }
+-    if (!mc_version || mc_version === "auto") {
+-        delete options.version;
+-    }
++    // DreamBot: NEVER delete version — autoVersion causes protocol '-1' on Aternos
++    console.log('[DreamBot] Connecting with version:', options.version, 'host:', options.host, 'port:', options.port);
+ 
+     const bot = createBot(options);

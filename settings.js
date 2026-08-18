@@ -1,5 +1,5 @@
 const settings = {
-    // Fixed to match Aternos Paper version (avoids protocol -1 auto-detect failure)
+    // MUST match Aternos exactly — never use false/auto (causes protocol -1)
     "minecraft_version": "1.21.11",
     "host": "DarkFantasytxt.aternos.me",
     "port": 25831,
@@ -36,4 +36,5 @@ export default settings;
 if (typeof process !== 'undefined') {
     process.env.MC_HOST = process.env.MC_HOST || settings.host;
     process.env.MC_PORT = process.env.MC_PORT || String(settings.port);
+    process.env.MC_VERSION = process.env.MC_VERSION || settings.minecraft_version;
 }
