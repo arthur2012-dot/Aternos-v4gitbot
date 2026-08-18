@@ -8,10 +8,13 @@ try {
     console.warn('keys.json not found. Using environment variables only.');
 }
 
-/** Prefer Railway/env secrets over keys.json (never commit real keys). */
+/** Env vars override keys.json. */
 export function getKey(name) {
     const aliases = {
         GROQCLOUD_API_KEY: ['GROQCLOUD_API_KEY', 'GROQ_API_KEY'],
+        CEREBRAS_API_KEY: ['CEREBRAS_API_KEY'],
+        GEMINI_API_KEY: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+        OPENROUTER_API_KEY: ['OPENROUTER_API_KEY'],
     };
     const names = aliases[name] || [name];
 
@@ -26,7 +29,7 @@ export function getKey(name) {
         }
     }
     throw new Error(
-        `API key "${name}" not found. Set GROQCLOUD_API_KEY (or GROQ_API_KEY) in Railway Variables — never put the key in GitHub.`
+        `API key "${name}" not found. Set it in keys.json or Railway Variables.`
     );
 }
 
