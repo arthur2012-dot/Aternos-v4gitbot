@@ -3,7 +3,7 @@ const settings = {
     "minecraft_version": false,
     "host": "DarkFantasytxt.aternos.me",
     // If Aternos changes the port after restart, update this value (check Aternos panel)
-    "port": 31082,
+    "port": 25831,
     "auth": "offline",
     "mindserver_port": Number(process.env.PORT) || 8081,
     "auto_open_ui": false,
