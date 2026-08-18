@@ -8,8 +8,8 @@ const settings = {
     base_profile: "survival",
     profiles: ["./profiles/dream.json"],
     load_memory: true,
-    // Mindcraft official: system message can include !commands executed on start
-    init_message: "Colete madeira. !collectBlocks(\"oak_log\", 8)",
+    // Mindcraft: init can run !goal / !collectBlocks on spawn
+    init_message: "Sobreviva. !goal(\"Coletar madeira, craftar ferramentas, minerar pedra, pegar comida, abrigo. Sempre use !comandos.\")",
     only_chat_with: [],
     speak: false,
     chat_ingame: true,
@@ -28,10 +28,10 @@ const settings = {
         "!attackPlayer"
     ],
     code_timeout_mins: -1,
-    relevant_docs_count: 5,
-    max_messages: 6,
+    relevant_docs_count: 8,
+    max_messages: 8,
     num_examples: 0,
-    max_commands: 2,
+    max_commands: 3,
     show_command_syntax: "never",
     narrate_behavior: false,
     chat_bot_messages: false,

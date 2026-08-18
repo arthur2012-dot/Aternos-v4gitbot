@@ -1,11 +1,5 @@
 /**
- * DreamBot on Mindcraft upstream — remaining gaps fixed:
- * - modes stopLoop removed (autonomy)
- * - goToGoal PathStopped soft
- * - collectBlock PathStopped soft (no fatal)
- * - unstuck softer + stay online
- * - idle wood worker without LLM
- * - force 1.21.11
+ * DreamBot = Mindcraft + survival progression worker (techtree-like without task system)
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -68,7 +62,6 @@ function refresh() {
     cpSync(from, join(ROOT, rel));
     console.log('[fetch-base] restored', rel);
   }
-  // ensure survival defaults exist
   const defFrom = join(TMP, 'profiles', 'defaults');
   const defTo = join(ROOT, 'profiles', 'defaults');
   if (existsSync(defFrom)) {
@@ -78,18 +71,16 @@ function refresh() {
 }
 
 function applyFixes() {
-  // ---- modes.js ----
   let modes = read('src/agent/modes.js');
   modes = modes.replace(
     /if\s*\(\s*agent\.self_prompter\.isActive\(\)\s*\)\s*\n?\s*agent\.self_prompter\.stopLoop\(\);/,
-    '// DreamBot: keep self-prompt (Mindcraft stopLoop was killing tasks)'
+    '// DreamBot: keep self-prompt'
   );
   modes = modes.replace(/max_stuck_time:\s*20/, 'max_stuck_time: 55');
   modes = modes.replace(
     /agent\.cleanKill\(["']Got stuck[^"']*["']\)/g,
     `console.warn('[DreamBot] stuck — stay online')`
   );
-  // Don't treat PathStopped from self_preservation as fatal chatter
   if (!modes.includes('[DreamBot] resume after mode')) {
     modes = modes.replace(
       /if\s*\(\s*should_reprompt\s*\)\s*\{/,
@@ -97,7 +88,7 @@ function applyFixes() {
     try {
       if (agent.self_prompter && !agent.self_prompter.isActive()) {
         setTimeout(() => {
-          try { agent.self_prompter.start(agent.self_prompter.prompt || 'Collect wood !collectBlocks'); } catch {}
+          try { agent.self_prompter.start(agent.self_prompter.prompt || 'Survive with !commands'); } catch {}
         }, 6000);
       }
     } catch {}
@@ -105,12 +96,8 @@ function applyFixes() {
     );
   }
   write('src/agent/modes.js', modes);
-  console.log('[fetch-base] modes OK');
 
-  // ---- skills.js ----
   let skills = read('src/agent/library/skills.js');
-
-  // soft PathStopped in goToGoal (upstream rethrows)
   if (!skills.includes('[DreamBot] soft PathStopped')) {
     skills = skills.replace(
       /try \{\s*await bot\.pathfinder\.goto\(goal\);\s*clearInterval\(doorCheckInterval\);\s*return true;\s*\} catch \(err\) \{\s*clearInterval\(doorCheckInterval\);\s*\/\/[^\n]*\n\s*throw err;\s*\}/,
@@ -130,38 +117,15 @@ function applyFixes() {
     }`
     );
   }
-
-  // soft PathStopped inside collectBlock catch
-  if (!skills.includes('[DreamBot] collect soft')) {
-    skills = skills.replace(
-      /catch \(err\) \{\s*if \(err\.name === 'NoChests'\) \{[\s\S]*?break;\s*\}\s*else \{\s*log\(bot, `Failed to collect \$\{blockType\}: \$\{err\}\.`\);\s*continue;\s*\}\s*\}/,
-      `catch (err) {
-            // [DreamBot] collect soft
-            if (err.name === 'NoChests') {
-                log(bot, \\'Failed to collect \\'+blockType+\\': Inventory full.\\');
-                break;
-            }
-            if (/PathStopped|NoPath|Timeout/i.test(String(err?.message || err))) {
-                console.warn('[DreamBot] collect PathStopped — retry next');
-                continue;
-            }
-            log(bot, \\'Failed to collect \\'+blockType+\\': \\'+err);
-            continue;
-        }`
-    );
-  }
-
   write('src/agent/library/skills.js', skills);
-  console.log('[fetch-base] skills OK');
 
-  // ---- agent.js ----
   let agent = read('src/agent/agent.js');
   if (agent.includes('Hello world! I am')) {
     agent = agent.replace(
       /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/,
       `try {
             if (this.self_prompter && !this.self_prompter.isActive()) {
-                this.self_prompter.start('Collect wood. Always use !collectBlocks or !craftRecipe.');
+                this.self_prompter.start('Survive: wood, craft tools, mine, food, shelter. Always !command.');
             }
         } catch {}`
     );
@@ -189,7 +153,9 @@ function applyFixes() {
     }`
     );
   }
-  if (!agent.includes('[DreamBot] idle worker')) {
+
+  // FULL survival progression worker (Mindcraft techtree-like, no LLM required)
+  if (!agent.includes('[DreamBot] survival worker')) {
     agent = agent.replace(
       /this\.bot\.once\('spawn', async \(\) => \{\s*try \{\s*clearTimeout\(spawnTimeout\);/,
       `this.bot.once('spawn', async () => {
@@ -208,46 +174,160 @@ function applyFixes() {
                 }
             } catch (e) { console.warn('[DreamBot] pathfinder', e.message); }
 
+            // Save home on first spawn
+            try {
+                if (!this._homePos && this.bot.entity) {
+                    this._homePos = this.bot.entity.position.clone();
+                    console.log('[DreamBot] home set', this._homePos);
+                }
+            } catch {}
+
             setInterval(async () => {
                 try {
                     const bot = this.bot;
                     if (!bot?.entity || this.actions?.executing) return;
                     if (bot.pathfinder?.isMoving?.()) return;
-                    console.log('[DreamBot] idle worker');
+                    console.log('[DreamBot] survival worker');
                     try { bot.modes?.pause?.('unstuck'); } catch {}
                     const skills = await import('./library/skills.js');
-                    for (const k of ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log']) {
+                    const inv = bot.inventory.items();
+                    const count = (n) => inv.filter(i => i.name === n || (n.endsWith('_log') && /_log$/.test(i.name))).reduce((a,i)=>a+i.count,0);
+                    const has = (n) => inv.some(i => i.name === n || (typeof n === 'object' && n.test?.(i.name)));
+                    const logs = inv.filter(i => /_log$/.test(i.name)).reduce((a,i)=>a+i.count,0);
+                    const planks = inv.filter(i => /_planks$/.test(i.name)).reduce((a,i)=>a+i.count,0);
+                    const hasTable = has('crafting_table');
+                    const hasPick = inv.some(i => /pickaxe/.test(i.name));
+                    const hasAxe = inv.some(i => /_axe$/.test(i.name) && !/pickaxe/.test(i.name));
+                    const sticks = count('stick');
+                    const cobble = count('cobblestone') + count('stone');
+
+                    // 1) Need wood
+                    if (logs < 6 && !hasPick) {
+                        for (const k of ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log']) {
+                            try { if (await skills.collectBlock(bot, k, 3)) { console.log('[DreamBot] wood', k); return; } } catch {}
+                        }
+                        const log = bot.findBlock({ matching: b => b && /_log$/.test(b.name), maxDistance: 12 });
+                        if (log) { try { await bot.dig(log); return; } catch {} }
+                    }
+
+                    // 2) Planks
+                    if (logs >= 1 && planks < 8) {
                         try {
-                            const ok = await skills.collectBlock(bot, k, 2);
-                            if (ok) { console.log('[DreamBot] got', k); try { bot.modes?.unpause?.('unstuck'); } catch {} return; }
+                            const wood = inv.find(i => /_log$/.test(i.name));
+                            if (wood) {
+                                const name = wood.name.replace('_log','_planks').replace('log', 'planks');
+                                // oak_log -> oak_planks
+                                const recipeName = wood.name.includes('log') ? wood.name.replace('_log','_planks') : 'oak_planks';
+                                await skills.craftRecipe(bot, recipeName, 2);
+                                console.log('[DreamBot] crafted planks');
+                                return;
+                            }
+                        } catch (e) { console.warn('[DreamBot] planks', e.message); }
+                    }
+
+                    // 3) Crafting table
+                    if (!hasTable && planks >= 4) {
+                        try {
+                            await skills.craftRecipe(bot, 'crafting_table', 1);
+                            console.log('[DreamBot] crafted table');
+                            return;
+                        } catch (e) { console.warn('[DreamBot] table', e.message); }
+                    }
+
+                    // 4) Sticks
+                    if (sticks < 4 && planks >= 2) {
+                        try {
+                            await skills.craftRecipe(bot, 'stick', 4);
+                            console.log('[DreamBot] sticks');
+                            return;
                         } catch {}
                     }
-                    try { bot.modes?.unpause?.('unstuck'); } catch {}
-                    const log = bot.findBlock({ matching: b => b && /_log$/i.test(b.name), maxDistance: 10 });
-                    if (log) { try { await bot.dig(log); return; } catch {} }
-                    bot.setControlState('forward', true);
-                    bot.setControlState('sprint', true);
-                    bot.setControlState('jump', true);
-                    setTimeout(() => {
+
+                    // 5) Wooden tools
+                    if (!hasPick && planks >= 3 && sticks >= 2) {
                         try {
-                            bot.setControlState('jump', false);
-                            bot.setControlState('forward', false);
-                            bot.setControlState('sprint', false);
-                            bot.look(bot.entity.yaw + 0.8, 0);
+                            await skills.craftRecipe(bot, 'wooden_pickaxe', 1);
+                            await skills.equip(bot, 'wooden_pickaxe');
+                            console.log('[DreamBot] wooden pickaxe');
+                            return;
+                        } catch (e) { console.warn('[DreamBot] pick', e.message); }
+                    }
+                    if (!hasAxe && planks >= 3 && sticks >= 2) {
+                        try { await skills.craftRecipe(bot, 'wooden_axe', 1); return; } catch {}
+                    }
+
+                    // 6) Mine stone
+                    if (hasPick && cobble < 12) {
+                        try {
+                            if (await skills.collectBlock(bot, 'stone', 5)) {
+                                console.log('[DreamBot] stone');
+                                return;
+                            }
                         } catch {}
-                    }, 400);
+                        try {
+                            if (await skills.collectBlock(bot, 'cobblestone', 5)) return;
+                        } catch {}
+                    }
+
+                    // 7) Stone tools
+                    if (cobble >= 3 && sticks >= 2 && !inv.some(i => i.name === 'stone_pickaxe')) {
+                        try {
+                            await skills.craftRecipe(bot, 'stone_pickaxe', 1);
+                            await skills.equip(bot, 'stone_pickaxe');
+                            console.log('[DreamBot] stone pickaxe');
+                            return;
+                        } catch {}
+                    }
+
+                    // 8) Food: hunt via skill if hungry
+                    if (bot.food < 16) {
+                        try {
+                            for (const mob of ['chicken','cow','pig','sheep']) {
+                                try {
+                                    if (await skills.attackNearest(bot, mob, true)) {
+                                        console.log('[DreamBot] hunted', mob);
+                                        return;
+                                    }
+                                } catch {}
+                            }
+                        } catch {}
+                    }
+
+                    // 9) Night: try bed
+                    try {
+                        const t = bot.time?.timeOfDay;
+                        if (t != null && (t > 13000 || t < 1000)) {
+                            try { await skills.goToBed(bot); console.log('[DreamBot] slept'); return; } catch {}
+                        }
+                    } catch {}
+
+                    // 10) Explore
+                    try { await skills.moveAway(bot, 10); console.log('[DreamBot] explore'); } catch {
+                        bot.setControlState('forward', true);
+                        bot.setControlState('sprint', true);
+                        bot.setControlState('jump', true);
+                        setTimeout(() => {
+                            try {
+                                bot.setControlState('jump', false);
+                                bot.setControlState('forward', false);
+                                bot.setControlState('sprint', false);
+                                bot.look(bot.entity.yaw + 0.9, 0);
+                            } catch {}
+                        }, 500);
+                    }
+                    try { bot.modes?.unpause?.('unstuck'); } catch {}
                 } catch (e) {
                     if (!/PathStopped/i.test(String(e?.message||e)))
-                        console.warn('[DreamBot] idle', e.message);
+                        console.warn('[DreamBot] survival', e.message);
                 }
-            }, 16000);
+            }, 14000);
 
             setInterval(() => {
                 try {
                     if (!this.self_prompter) return;
                     if (this.self_prompter.isActive?.()) return;
                     console.log('[DreamBot] self-prompt restart');
-                    this.self_prompter.start('!collectBlocks(\"oak_log\", 5)');
+                    this.self_prompter.start('Survive: wood tools stone food shelter. Use !commands.');
                 } catch {}
             }, 50000);
 
@@ -256,9 +336,7 @@ function applyFixes() {
     );
   }
   write('src/agent/agent.js', agent);
-  console.log('[fetch-base] agent OK');
 
-  // ---- self_prompter ----
   let sp = read('src/agent/self_prompter.js');
   sp = sp.replace(/MAX_NO_COMMAND = \d+/, 'MAX_NO_COMMAND = 30');
   if (sp.includes('Stopping auto-prompting')) {
@@ -266,13 +344,12 @@ function applyFixes() {
       /let out = `Agent did not use command[\s\S]*?this\.state = STOPPED;/,
       `console.warn('[DreamBot] soft pause');
                     this.state = PAUSED;
-                    setTimeout(() => { try { this.start(this.prompt || 'Collect wood'); } catch {} }, 20000);`
+                    setTimeout(() => { try { this.start(this.prompt || 'Survive'); } catch {} }, 20000);`
     );
   }
   sp = sp.replace(/this\.state = STOPPED;/g, 'this.state = PAUSED;');
   write('src/agent/self_prompter.js', sp);
 
-  // ---- mcdata version ----
   let mc = read('src/utils/mcdata.js');
   if (!mc.includes('DreamBot: NEVER delete version')) {
     mc = mc.replace(
@@ -284,7 +361,7 @@ function applyFixes() {
     write('src/utils/mcdata.js', mc);
   }
 
-  console.log('[fetch-base] remaining Mindcraft gaps fixed');
+  console.log('[fetch-base] Mindcraft + survival progression applied');
 }
 
 try {
@@ -328,7 +405,7 @@ export class Camera extends EventEmitter {
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
   const ms = join(ROOT, 'scripts', 'patch-mindserver.js');
   if (existsSync(ms)) { try { run(`node "${ms}"`); } catch {} }
-  console.log('[fetch-base] Ready — Mindcraft complete');
+  console.log('[fetch-base] Ready — survival techtree worker');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);
