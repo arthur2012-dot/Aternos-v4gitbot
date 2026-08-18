@@ -25,15 +25,15 @@ const settings = {
         "!newAction",
     ],
     code_timeout_mins: -1,
-    relevant_docs_count: 4,
+    relevant_docs_count: 6,
     max_messages: 6,
     num_examples: 0,
-    max_commands: 2,
+    max_commands: 3,
     show_command_syntax: "never",
     narrate_behavior: false,
     chat_bot_messages: false,
     spawn_timeout: 120,
-    block_place_delay: 35,
+    block_place_delay: 30,
     log_all_prompts: false,
 };
 
