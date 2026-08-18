@@ -1,8 +1,7 @@
 /**
- * DreamBot — Mindcraft base + FULL PASSIVE mode
- * Passive does the same progression as active (no LLM required):
- * wood → planks → table → sticks → tools → stone → furnace → food → house → explore
- * + terrain dig/jump + bridge/pillar when stuck
+ * DreamBot — Mindcraft + FULL PASSIVE + mode coordination
+ * Fixes: modes fighting each other (unstuck/defense/worker/pathfinder)
+ * One lock, fewer interrupts, longer intervals
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -75,15 +74,51 @@ function refresh() {
 
 function applyFixes() {
   let modes = read('src/agent/modes.js');
+
+  // Never kill self-prompt when a mode runs
   modes = modes.replace(
-    /if\s*\(\s*agent\.self_prompter\.isActive\(\)\s*\)\s*\n?\s*agent\.self_prompter\.stopLoop\(\);/,
-    '// DreamBot: keep self-prompt'
+    /if\s*\(\s*agent\.self_prompter\.isActive\(\)\s*\)\s*\n?\s*agent\.self_prompter\.stopLoop\(\);/g,
+    '// DreamBot: keep self-prompt (no stopLoop)'
   );
-  modes = modes.replace(/max_stuck_time:\s*20/, 'max_stuck_time: 60');
+
+  // Stuck: longer + no kill
+  modes = modes.replace(/max_stuck_time:\s*20/g, 'max_stuck_time: 90');
   modes = modes.replace(
     /agent\.cleanKill\(["']Got stuck[^"']*["']\)/g,
     `console.warn('[DreamBot] stuck — stay online')`
   );
+
+  // CRITICAL: only interrupt actions for combat/death threat — not hunting/unstuck/items
+  // Mindcraft default interrupts too often → mode thrashing
+  if (!modes.includes('[DreamBot] soft interrupt')) {
+    // unstuck: do not interrupt current action (let it finish or pathfinder handle)
+    modes = modes.replace(
+      /(name:\s*['"]unstuck['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
+      `$1false /* [DreamBot] soft interrupt: unstuck never interrupts */`
+    );
+    // hunting: do not interrupt
+    modes = modes.replace(
+      /(name:\s*['"]hunting['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
+      `$1false /* [DreamBot] soft interrupt: hunting never interrupts */`
+    );
+    // item_collecting: do not interrupt
+    modes = modes.replace(
+      /(name:\s*['"]item_collecting['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
+      `$1false /* [DreamBot] soft interrupt: items never interrupt */`
+    );
+    // torch_placing: do not interrupt
+    modes = modes.replace(
+      /(name:\s*['"]torch_placing['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
+      `$1false /* [DreamBot] soft interrupt: torch never interrupts */`
+    );
+    // elbow_room: do not interrupt
+    modes = modes.replace(
+      /(name:\s*['"]elbow_room['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
+      `$1false /* [DreamBot] soft interrupt: elbow never interrupts */`
+    );
+    console.log('[fetch-base] modes: soft interrupt (only defense may interrupt)');
+  }
+
   if (!modes.includes('[DreamBot] resume after mode')) {
     modes = modes.replace(
       /if\s*\(\s*should_reprompt\s*\)\s*\{/,
@@ -91,8 +126,12 @@ function applyFixes() {
     try {
       if (agent.self_prompter && !agent.self_prompter.isActive()) {
         setTimeout(() => {
-          try { agent.self_prompter.start(agent.self_prompter.prompt || 'Survive with !commands'); } catch {}
-        }, 5000);
+          try {
+            if (!agent._dreamLock) {
+              agent.self_prompter.start(agent.self_prompter.prompt || 'Survive with !commands');
+            }
+          } catch {}
+        }, 12000);
       }
     } catch {}
     if (should_reprompt) {`
@@ -184,14 +223,32 @@ function applyFixes() {
     );
   }
 
-  // FULL PASSIVE BRAIN — same goals as active mode, no LLM
-  if (!agent.includes('[DreamBot] FULL PASSIVE')) {
+  // Coordinated passive + terrain (ONE lock — no mode thrashing)
+  if (!agent.includes('[DreamBot] COORDINATED')) {
     agent = agent.replace(
       /this\.bot\.once\('spawn', async \(\) => \{\s*try \{\s*clearTimeout\(spawnTimeout\);/,
       `this.bot.once('spawn', async () => {
             try { clearTimeout(spawnTimeout); } catch {}
 
-            // Pathfinder: dig / parkour / sprint / towers
+            this._dreamLock = false; // global: only one dream action at a time
+            this._dreamLockUntil = 0;
+
+            const dreamBusy = () => this._dreamLock || Date.now() < (this._dreamLockUntil || 0);
+            const dreamAcquire = (ms = 8000) => {
+                if (dreamBusy()) return false;
+                this._dreamLock = true;
+                this._dreamLockUntil = Date.now() + ms;
+                return true;
+            };
+            const dreamRelease = () => {
+                this._dreamLock = false;
+                this._dreamLockUntil = 0;
+            };
+            const isPathing = () => {
+                try { return !!this.bot.pathfinder?.isMoving?.(); } catch { return false; }
+            };
+            const isActing = () => !!this.actions?.executing;
+
             try {
                 const pf = await import('mineflayer-pathfinder');
                 const Movements = pf.Movements || pf.default?.Movements;
@@ -213,17 +270,18 @@ function applyFixes() {
             try {
                 if (!this._homePos && this.bot.entity) {
                     this._homePos = this.bot.entity.position.clone();
-                    console.log('[DreamBot] home', this._homePos);
                 }
             } catch {}
 
-            // —— TERRAIN every 2s: dig wall, jump step, pillar ——
+            // TERRAIN — only when idle (no path, no action, no lock)
             setInterval(async () => {
                 try {
+                    if (dreamBusy() || isPathing() || isActing()) return;
                     const bot = this.bot;
                     if (!bot?.entity) return;
+                    if (!dreamAcquire(3000)) return;
                     let Vec3;
-                    try { Vec3 = (await import('vec3')).default || (await import('vec3')).Vec3; } catch { return; }
+                    try { Vec3 = (await import('vec3')).default || (await import('vec3')).Vec3; } catch { dreamRelease(); return; }
                     const pos = bot.entity.position;
                     const yaw = bot.entity.yaw;
                     const dx = -Math.sin(yaw);
@@ -238,7 +296,9 @@ function applyFixes() {
                     const above = bot.blockAt(new Vec3(fx, fy + 2, fz));
 
                     if (solid(head)) {
-                        try { await bot.dig(head); console.log('[DreamBot] dig wall', head.name); return; } catch {}
+                        try { await bot.dig(head); console.log('[DreamBot] dig wall', head.name); } catch {}
+                        dreamRelease();
+                        return;
                     }
                     if (solid(feet) && !solid(head) && !solid(above)) {
                         bot.setControlState('jump', true);
@@ -250,15 +310,16 @@ function applyFixes() {
                                 bot.setControlState('forward', false);
                                 bot.setControlState('sprint', false);
                             } catch {}
+                            dreamRelease();
                         }, 400);
                         console.log('[DreamBot] jump step');
                         return;
                     }
                     if (solid(feet) && solid(head)) {
-                        try { await bot.dig(feet); console.log('[DreamBot] dig obstacle'); return; } catch {}
+                        try { await bot.dig(feet); console.log('[DreamBot] dig obstacle'); } catch {}
+                        dreamRelease();
+                        return;
                     }
-
-                    // Gap in front (bridge): place block if we have building blocks
                     const gap = bot.blockAt(new Vec3(fx, fy - 1, fz));
                     if (gap && (gap.name === 'air' || gap.name === 'cave_air' || gap.name.includes('water'))) {
                         const placeable = bot.inventory.items().find(i =>
@@ -271,51 +332,33 @@ function applyFixes() {
                                 if (ref && solid(ref)) {
                                     const face = new Vec3(Math.sign(dx) || 0, 0, Math.sign(dz) || 0);
                                     await bot.placeBlock(ref, face);
-                                    console.log('[DreamBot] passive bridge');
-                                    return;
+                                    console.log('[DreamBot] bridge');
                                 }
                             } catch {}
                         }
                     }
-                } catch {}
-            }, 2000);
+                    dreamRelease();
+                } catch { try { this._dreamLock = false; } catch {} }
+            }, 4000);
 
-            // —— Unstick if not moving ——
+            // UNSTICK — only if truly idle and stuck long
             let stillTicks = 0;
             let lastPos = null;
-            setInterval(async () => {
+            setInterval(() => {
                 try {
+                    if (dreamBusy() || isPathing() || isActing()) {
+                        stillTicks = 0;
+                        return;
+                    }
                     const bot = this.bot;
                     if (!bot?.entity) return;
                     const p = bot.entity.position;
-                    if (lastPos && p.distanceTo(lastPos) < 0.12) stillTicks++;
+                    if (lastPos && p.distanceTo(lastPos) < 0.1) stillTicks++;
                     else stillTicks = 0;
                     lastPos = p.clone();
-                    if (stillTicks < 4) return;
+                    if (stillTicks < 6) return; // ~12s still
                     stillTicks = 0;
-                    let Vec3;
-                    try { Vec3 = (await import('vec3')).default || (await import('vec3')).Vec3; } catch {}
-                    // try pillar up one block if have blocks
-                    const placeable = bot.inventory.items().find(i =>
-                        /dirt|cobblestone|planks|stone$|netherrack/.test(i.name)
-                    );
-                    if (placeable && Vec3) {
-                        try {
-                            await bot.equip(placeable, 'hand');
-                            const below = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-                            if (below) {
-                                bot.setControlState('jump', true);
-                                setTimeout(async () => {
-                                    try {
-                                        await bot.placeBlock(below, new Vec3(0, 1, 0));
-                                        console.log('[DreamBot] passive pillar');
-                                    } catch {}
-                                    try { bot.setControlState('jump', false); } catch {}
-                                }, 200);
-                                return;
-                            }
-                        } catch {}
-                    }
+                    if (!dreamAcquire(2000)) return;
                     bot.look(bot.entity.yaw + (Math.random() > 0.5 ? 1.0 : -1.0), 0);
                     bot.setControlState('jump', true);
                     bot.setControlState('forward', true);
@@ -326,24 +369,21 @@ function applyFixes() {
                             bot.setControlState('forward', false);
                             bot.setControlState('sprint', false);
                         } catch {}
-                    }, 550);
+                        dreamRelease();
+                    }, 500);
                     console.log('[DreamBot] unstick turn+jump');
-                } catch {}
-            }, 1800);
+                } catch { try { this._dreamLock = false; } catch {} }
+            }, 2000);
 
-            // —— FULL PASSIVE survival brain (mirrors active mode goals) ——
-            // Runs even when Groq is dead. Does NOT wait for LLM.
-            let passiveBusy = false;
+            // FULL PASSIVE — only when completely idle
             setInterval(async () => {
-                if (passiveBusy) return;
                 try {
+                    if (dreamBusy() || isPathing() || isActing()) return;
                     const bot = this.bot;
                     if (!bot?.entity) return;
-                    // Allow passive even if LLM action is idle; skip only if actively pathing far
-                    if (this.actions?.executing && bot.pathfinder?.isMoving?.()) return;
-                    passiveBusy = true;
-                    console.log('[DreamBot] FULL PASSIVE tick');
-                    try { bot.modes?.pause?.('unstuck'); } catch {}
+                    if (!dreamAcquire(25000)) return;
+                    console.log('[DreamBot] PASSIVE tick');
+                    // DO NOT pause/unpause modes — that causes thrashing
                     const skills = await import('./library/skills.js');
                     const inv = () => bot.inventory.items();
                     const count = (n) => inv().filter(i => i.name === n).reduce((a, i) => a + i.count, 0);
@@ -353,16 +393,15 @@ function applyFixes() {
                     const sticks = count('stick');
                     const cobble = count('cobblestone') + count('stone');
                     const hasTable = has('crafting_table');
-                    const hasFurnace = has('furnace');
                     const hasPick = inv().some(i => /pickaxe/.test(i.name));
                     const hasAxe = inv().some(i => /_axe$/.test(i.name) && !/pickaxe/.test(i.name));
                     const hasSword = inv().some(i => /sword/.test(i.name));
-                    const hasTorch = count('torch') > 0;
                     const buildBlocks = inv().filter(i =>
                         /dirt|cobblestone|planks|stone$|andesite|granite|diorite|deepslate|netherrack/.test(i.name)
                     ).reduce((a, i) => a + i.count, 0);
 
-                    // Eat if hungry and have food
+                    const done = () => { dreamRelease(); };
+
                     if (bot.food < 16) {
                         const food = inv().find(i =>
                             /cooked_|bread|apple|carrot|potato|beef|pork|chicken|mutton|cod|salmon/.test(i.name)
@@ -371,278 +410,222 @@ function applyFixes() {
                             try {
                                 await bot.equip(food, 'hand');
                                 await bot.consume();
-                                console.log('[DreamBot] passive eat', food.name);
-                                passiveBusy = false;
+                                console.log('[DreamBot] eat', food.name);
+                                done();
                                 return;
                             } catch {}
                         }
                     }
 
-                    // 1) WOOD
                     if (logs < 10 && (!hasPick || logs < 4)) {
                         for (const k of ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log']) {
                             try {
-                                if (await skills.collectBlock(bot, k, 5)) {
-                                    console.log('[DreamBot] passive wood', k);
-                                    passiveBusy = false;
+                                if (await skills.collectBlock(bot, k, 4)) {
+                                    console.log('[DreamBot] wood', k);
+                                    done();
                                     return;
                                 }
                             } catch {}
                         }
-                        const log = bot.findBlock({ matching: b => b && /_log$/.test(b.name), maxDistance: 20 });
+                        const log = bot.findBlock({ matching: b => b && /_log$/.test(b.name), maxDistance: 16 });
                         if (log) {
                             try {
                                 if (log.position.distanceTo(bot.entity.position) > 3.5) {
                                     try { await skills.goToPosition(bot, log.position.x, log.position.y, log.position.z, 2); } catch {}
                                 }
                                 await bot.dig(log);
-                                console.log('[DreamBot] passive dig log');
-                                passiveBusy = false;
+                                console.log('[DreamBot] dig log');
+                                done();
                                 return;
                             } catch {}
                         }
                     }
 
-                    // 2) PLANKS
                     if (logs >= 1 && planks < 16) {
                         try {
                             const wood = inv().find(i => /_log$/.test(i.name));
                             if (wood) {
                                 await skills.craftRecipe(bot, wood.name.replace('_log', '_planks'), 3);
-                                console.log('[DreamBot] passive planks');
-                                passiveBusy = false;
+                                console.log('[DreamBot] planks');
+                                done();
                                 return;
                             }
                         } catch (e) { console.warn('[DreamBot] planks', e.message); }
                     }
 
-                    // 3) CRAFTING TABLE
                     if (!hasTable && planks >= 4) {
                         try {
                             await skills.craftRecipe(bot, 'crafting_table', 1);
-                            console.log('[DreamBot] passive table');
-                            passiveBusy = false;
+                            console.log('[DreamBot] table');
+                            done();
                             return;
                         } catch (e) { console.warn('[DreamBot] table', e.message); }
                     }
 
-                    // Place table nearby if in inv and not placed recently
                     if (hasTable && !this._tablePlaced) {
                         try {
                             await skills.placeBlock(bot, 'crafting_table', bot.entity.position.x + 1, bot.entity.position.y, bot.entity.position.z);
                             this._tablePlaced = true;
-                            console.log('[DreamBot] passive place table');
-                            passiveBusy = false;
+                            console.log('[DreamBot] place table');
+                            done();
                             return;
                         } catch {}
                     }
 
-                    // 4) STICKS
                     if (sticks < 8 && planks >= 2) {
                         try {
                             await skills.craftRecipe(bot, 'stick', 4);
-                            console.log('[DreamBot] passive sticks');
-                            passiveBusy = false;
+                            console.log('[DreamBot] sticks');
+                            done();
                             return;
                         } catch {}
                     }
 
-                    // 5) WOODEN TOOLS
                     if (!hasPick && planks >= 3 && sticks >= 2) {
                         try {
                             await skills.craftRecipe(bot, 'wooden_pickaxe', 1);
                             await skills.equip(bot, 'wooden_pickaxe');
-                            console.log('[DreamBot] passive wooden pickaxe');
-                            passiveBusy = false;
+                            console.log('[DreamBot] wooden pickaxe');
+                            done();
                             return;
                         } catch (e) { console.warn('[DreamBot] pick', e.message); }
                     }
                     if (!hasAxe && planks >= 3 && sticks >= 2) {
                         try {
                             await skills.craftRecipe(bot, 'wooden_axe', 1);
-                            console.log('[DreamBot] passive wooden axe');
-                            passiveBusy = false;
+                            done();
                             return;
                         } catch {}
                     }
                     if (!hasSword && planks >= 2 && sticks >= 1) {
                         try {
                             await skills.craftRecipe(bot, 'wooden_sword', 1);
-                            console.log('[DreamBot] passive wooden sword');
-                            passiveBusy = false;
+                            done();
                             return;
                         } catch {}
                     }
 
-                    // 6) STONE
                     if (hasPick && cobble < 20) {
                         try {
-                            await skills.equip(bot, inv().find(i => /pickaxe/.test(i.name))?.name || 'wooden_pickaxe');
+                            const pick = inv().find(i => /pickaxe/.test(i.name));
+                            if (pick) await skills.equip(bot, pick.name);
                         } catch {}
                         try {
-                            if (await skills.collectBlock(bot, 'stone', 8)) {
-                                console.log('[DreamBot] passive stone');
-                                passiveBusy = false;
-                                return;
-                            }
-                        } catch {}
-                        try {
-                            if (await skills.collectBlock(bot, 'cobblestone', 8)) {
-                                passiveBusy = false;
+                            if (await skills.collectBlock(bot, 'stone', 6)) {
+                                console.log('[DreamBot] stone');
+                                done();
                                 return;
                             }
                         } catch {}
                     }
 
-                    // 7) STONE TOOLS + FURNACE + TORCHES
                     if (cobble >= 3 && sticks >= 2 && !has('stone_pickaxe')) {
                         try {
                             await skills.craftRecipe(bot, 'stone_pickaxe', 1);
                             await skills.equip(bot, 'stone_pickaxe');
-                            console.log('[DreamBot] passive stone pickaxe');
-                            passiveBusy = false;
+                            console.log('[DreamBot] stone pickaxe');
+                            done();
                             return;
                         } catch {}
                     }
-                    if (cobble >= 3 && sticks >= 2 && !has('stone_axe')) {
-                        try {
-                            await skills.craftRecipe(bot, 'stone_axe', 1);
-                            console.log('[DreamBot] passive stone axe');
-                            passiveBusy = false;
-                            return;
-                        } catch {}
-                    }
-                    if (cobble >= 2 && sticks >= 1 && !has('stone_sword')) {
-                        try {
-                            await skills.craftRecipe(bot, 'stone_sword', 1);
-                            console.log('[DreamBot] passive stone sword');
-                            passiveBusy = false;
-                            return;
-                        } catch {}
-                    }
-                    if (!hasFurnace && cobble >= 8) {
+                    if (cobble >= 8 && !has('furnace')) {
                         try {
                             await skills.craftRecipe(bot, 'furnace', 1);
-                            console.log('[DreamBot] passive furnace');
-                            passiveBusy = false;
+                            console.log('[DreamBot] furnace');
+                            done();
                             return;
                         } catch {}
                     }
-                    if (!hasTorch && (has('coal') || has('charcoal')) && sticks >= 1) {
+                    if ((has('coal') || has('charcoal')) && sticks >= 1 && count('torch') < 4) {
                         try {
                             await skills.craftRecipe(bot, 'torch', 4);
-                            console.log('[DreamBot] passive torch');
-                            passiveBusy = false;
+                            done();
                             return;
                         } catch {}
                     }
 
-                    // 8) FOOD — hunt animals
-                    if (bot.food < 18) {
+                    if (bot.food < 16) {
                         for (const mob of ['chicken', 'cow', 'pig', 'sheep']) {
                             try {
                                 if (await skills.attackNearest(bot, mob, true)) {
-                                    console.log('[DreamBot] passive hunt', mob);
-                                    passiveBusy = false;
+                                    console.log('[DreamBot] hunt', mob);
+                                    done();
                                     return;
                                 }
                             } catch {}
                         }
                     }
 
-                    // 9) SIMPLE HOUSE (4x4 floor + walls) if have blocks and not built
                     if (!this._houseDone && buildBlocks >= 20 && hasPick) {
                         try {
                             const base = this._homePos || bot.entity.position;
                             const bx = Math.floor(base.x);
                             const by = Math.floor(base.y);
                             const bz = Math.floor(base.z);
-                            // floor 4x4
-                            for (let x = 0; x < 4 && !this._houseDone; x++) {
+                            for (let x = 0; x < 4; x++) {
                                 for (let z = 0; z < 4; z++) {
-                                    try {
-                                        await skills.placeBlock(bot, 'cobblestone', bx + x, by - 1, bz + z);
-                                    } catch {
-                                        try { await skills.placeBlock(bot, 'dirt', bx + x, by - 1, bz + z); } catch {}
-                                        try { await skills.placeBlock(bot, 'oak_planks', bx + x, by - 1, bz + z); } catch {}
-                                    }
+                                    try { await skills.placeBlock(bot, 'cobblestone', bx + x, by - 1, bz + z); }
+                                    catch { try { await skills.placeBlock(bot, 'dirt', bx + x, by - 1, bz + z); } catch {} }
                                 }
                             }
-                            // walls height 2 (simple)
                             for (let y = 0; y < 2; y++) {
                                 for (let i = 0; i < 4; i++) {
                                     for (const [ox, oz] of [[i, 0], [i, 3], [0, i], [3, i]]) {
-                                        try {
-                                            await skills.placeBlock(bot, 'cobblestone', bx + ox, by + y, bz + oz);
-                                        } catch {
-                                            try { await skills.placeBlock(bot, 'oak_planks', bx + ox, by + y, bz + oz); } catch {}
-                                        }
+                                        try { await skills.placeBlock(bot, 'cobblestone', bx + ox, by + y, bz + oz); }
+                                        catch { try { await skills.placeBlock(bot, 'oak_planks', bx + ox, by + y, bz + oz); } catch {} }
                                     }
                                 }
                             }
                             this._houseDone = true;
-                            console.log('[DreamBot] passive house done');
-                            try {
-                                if (this.bot.chat) { /* silent */ }
-                                // remember home in memory if available
-                                if (this.memory_bank?.rememberHere) {
-                                    this.memory_bank.rememberHere('base');
-                                }
-                            } catch {}
-                            passiveBusy = false;
+                            console.log('[DreamBot] house done');
+                            done();
                             return;
-                        } catch (e) {
-                            console.warn('[DreamBot] house', e.message);
-                        }
+                        } catch (e) { console.warn('[DreamBot] house', e.message); }
                     }
 
-                    // 10) NIGHT — bed
                     try {
                         const t = bot.time?.timeOfDay;
                         if (t != null && (t > 12500 || t < 500)) {
                             try {
                                 await skills.goToBed(bot);
-                                console.log('[DreamBot] passive sleep');
-                                passiveBusy = false;
+                                console.log('[DreamBot] sleep');
+                                done();
                                 return;
                             } catch {}
                         }
                     } catch {}
 
-                    // 11) Explore / keep moving
                     try {
-                        await skills.moveAway(bot, 14);
-                        console.log('[DreamBot] passive explore');
+                        await skills.moveAway(bot, 10);
+                        console.log('[DreamBot] explore');
                     } catch {
                         bot.setControlState('forward', true);
                         bot.setControlState('sprint', true);
-                        bot.setControlState('jump', true);
                         setTimeout(() => {
                             try {
-                                bot.setControlState('jump', false);
                                 bot.setControlState('forward', false);
                                 bot.setControlState('sprint', false);
-                                bot.look(bot.entity.yaw + 0.9, 0);
+                                bot.look(bot.entity.yaw + 0.8, 0);
                             } catch {}
-                        }, 700);
+                        }, 600);
                     }
-                    try { bot.modes?.unpause?.('unstuck'); } catch {}
+                    done();
                 } catch (e) {
                     if (!/PathStopped/i.test(String(e?.message || e)))
                         console.warn('[DreamBot] passive', e.message);
-                } finally {
-                    passiveBusy = false;
+                    try { this._dreamLock = false; } catch {}
                 }
-            }, 10000);
+            }, 15000);
 
-            // Self-prompt restart (active mode) — passive already covers survival
+            // Self-prompt rarely — passive already works; avoid fighting LLM vs passive
             setInterval(() => {
                 try {
+                    if (dreamBusy() || isPathing() || isActing()) return;
                     if (!this.self_prompter) return;
                     if (this.self_prompter.isActive?.()) return;
                     this.self_prompter.start('Survive: wood tools stone food house. Always !command.');
                 } catch {}
-            }, 50000);
+            }, 90000);
 
             try {
                 if (false) clearTimeout(spawnTimeout);`
@@ -657,7 +640,7 @@ function applyFixes() {
       /let out = `Agent did not use command[\s\S]*?this\.state = STOPPED;/,
       `console.warn('[DreamBot] soft pause');
                     this.state = PAUSED;
-                    setTimeout(() => { try { this.start(this.prompt || 'Survive'); } catch {} }, 15000);`
+                    setTimeout(() => { try { this.start(this.prompt || 'Survive'); } catch {} }, 20000);`
     );
   }
   sp = sp.replace(/this\.state = STOPPED;/g, 'this.state = PAUSED;');
@@ -674,7 +657,7 @@ function applyFixes() {
     write('src/utils/mcdata.js', mc);
   }
 
-  console.log('[fetch-base] FULL PASSIVE = active progression without LLM');
+  console.log('[fetch-base] coordinated modes + passive');
 }
 
 try {
@@ -718,7 +701,7 @@ export class Camera extends EventEmitter {
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
   const ms = join(ROOT, 'scripts', 'patch-mindserver.js');
   if (existsSync(ms)) { try { run(`node "${ms}"`); } catch {} }
-  console.log('[fetch-base] Ready — FULL PASSIVE mode');
+  console.log('[fetch-base] Ready — no mode thrashing');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);
