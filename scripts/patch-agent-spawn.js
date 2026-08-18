@@ -1,5 +1,5 @@
 /**
- * Full survival self-prompt, no Exiting chat, stay online on stuck.
+ * Craft/mine/bridge self-prompt, no Exiting, stay online.
  */
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -7,7 +7,7 @@ import { join } from 'path';
 const ROOT = process.cwd();
 
 const SELF_PROMPT =
-  'Survival completo: 1 collectBlocks log 2 craftRecipe crafting_table stick wooden_pickaxe wooden_axe 3 stone tools furnace torch 4 smeltItem ores 5 placeBlock casa/pilar/ponte 6 explore mine. Use putInChest takeFromChest goToSurface digDown. So caca se fome. Sempre 1-3 !comandos. Nunca diga bot. Nunca Exiting nem sair.';
+  'Use tools certo: pickaxe=minerar stone/ore, axe=log, sword=mob, shovel=dirt. Equip tool antes. collectBlocks log/stone/ore. craftRecipe mesa sticks pickaxe. placeBlock dirt/cobble pra BRIDGE e PILLAR se buraco ou subida. smeltItem se furnace. Nunca so caca. Sempre 1-3 !comandos. Nunca exit.';
 
 function patchAgent() {
   const p = join(ROOT, 'src', 'agent', 'agent.js');
@@ -98,9 +98,36 @@ function patchModes() {
   console.log('[patch-agent-spawn] modes done');
 }
 
+function patchPathfinder() {
+  // Ensure dig/place enabled for bridging when mcdata sets movements
+  const p = join(ROOT, 'src', 'utils', 'mcdata.js');
+  if (!existsSync(p)) return;
+  let src = readFileSync(p, 'utf8');
+  if (src.includes('DreamBot movements bridge')) return;
+  if (src.includes('new pf.Movements') || src.includes('Movements(bot)')) {
+    // soft inject after movements created if pattern exists
+    src = src.replace(
+      /(const movements = new (?:pf\.)?Movements\(bot\)\s*;)/,
+      `$1
+    // DreamBot movements bridge
+    try {
+      movements.canDig = true;
+      movements.allow1by1towers = true;
+      movements.allowParkour = true;
+      movements.allowSprinting = true;
+      if (bot.pathfinder) bot.pathfinder.setMovements(movements);
+    } catch (_) {}
+`
+    );
+    writeFileSync(p, src);
+    console.log('[patch-agent-spawn] pathfinder dig/tower');
+  }
+}
+
 try {
   patchAgent();
   patchModes();
+  patchPathfinder();
   console.log('[patch-agent-spawn] done');
 } catch (e) {
   console.warn('[patch-agent-spawn]', e.message);
