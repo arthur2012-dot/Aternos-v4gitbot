@@ -8,5 +8,38 @@ const settings = {
     "base_profile": "survival",
     "profiles": ["./profiles/dream.json"],
     "load_memory": true,
-    // Starts continuous survival loop so bot does not freeze after 1 action
-    "init_message": "!selfPrompt(\"Sobreviver: madeira, tools, comida, casa longe do spawn, ferro, portal. Se preso, destravar. Sempre escolha a proxima acao.
+    "init_message": "!selfPrompt(\"Sobreviver: madeira, tools, comida, casa longe do spawn, ferro, portal. Se preso destravar. Sempre escolha a proxima acao.\")",
+    "only_chat_with": [],
+    "speak": false,
+    "chat_ingame": true,
+    "language": "pt",
+    "render_bot_view": false,
+    "show_bot_views": false,
+    "allow_insecure_coding": false,
+    "allow_vision": false,
+    "blocked_actions": [
+        "!checkBlueprint",
+        "!checkBlueprintLevel",
+        "!getBlueprint",
+        "!getBlueprintLevel",
+        "!newAction"
+    ],
+    "code_timeout_mins": -1,
+    "relevant_docs_count": 3,
+    "max_messages": 8,
+    "num_examples": 0,
+    "max_commands": 2,
+    "show_command_syntax": "never",
+    "narrate_behavior": false,
+    "chat_bot_messages": false,
+    "spawn_timeout": 120,
+    "block_place_delay": 50,
+    "log_all_prompts": false,
+};
+export default settings;
+
+if (typeof process !== 'undefined') {
+    process.env.MC_HOST = process.env.MC_HOST || settings.host;
+    process.env.MC_PORT = process.env.MC_PORT || String(settings.port);
+    process.env.MC_VERSION = process.env.MC_VERSION || settings.minecraft_version;
+}

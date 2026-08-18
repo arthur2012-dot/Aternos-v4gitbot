@@ -6,19 +6,13 @@ import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
 
-/**
- * DreamBot agent process:
- * - Waits when Aternos is offline/starting (short queue, not hours)
- * - Pings before join
- * - Reasonable backoff (no 1 hour waits)
- */
 const STATE_DIR = join(process.cwd(), 'bots');
 const STATE_FILE = join(STATE_DIR, 'reconnect_state.json');
 
 function loadSettings() {
     return {
         host: process.env.MC_HOST || 'DarkFantasytxt.aternos.me',
-        port: Number(process.env.MC_PORT) || 31082,
+        port: Number(process.env.MC_PORT) || 25831,
     };
 }
 
@@ -40,6 +34,17 @@ function saveState(state) {
 
 function classifyDisconnect(code, signal, recentLogs = '') {
     const text = String(recentLogs || '').toLowerCase();
+
+    // Groq API rate limit is NOT a Minecraft throttle / ban
+    if (
+        text.includes('groq error') ||
+        text.includes('rate limit reached') ||
+        text.includes('rate limited by groq') ||
+        (text.includes('429') && text.includes('groq'))
+    ) {
+        return 'generic';
+    }
+
     if (
         text.includes('banned') ||
         text.includes('banido') ||
@@ -52,9 +57,8 @@ function classifyDisconnect(code, signal, recentLogs = '') {
     if (
         text.includes('kicked') ||
         text.includes('too many') ||
-        text.includes('rate') ||
-        text.includes('throttl') ||
-        text.includes('connection throttled')
+        text.includes('connection throttled') ||
+        text.includes('throttl')
     ) {
         return 'throttle';
     }
@@ -128,17 +132,14 @@ export class AgentProcess {
         this._recentStderr = '';
         this._offlineStreak = 0;
 
-        // Offline queue: 45s → 90s max (NOT hours)
         this.offlineWaitMs = 45_000;
         this.offlineWaitMaxMs = 90_000;
-
-        // Failed join / kick — still short
-        this.minBackoffMs = 20_000;       // 20s min
-        this.maxBackoffMs = 3 * 60_000;   // 3 min max
-        this.banPauseMs = 5 * 60_000;     // 5 min (was 1 hour — too much)
-        this.throttlePauseMs = 2 * 60_000; // 2 min
-        this.protocolPauseMs = 90_000;    // 90s
-        this.maxAttemptsPerHour = 20;
+        this.minBackoffMs = 15_000;
+        this.maxBackoffMs = 2 * 60_000;
+        this.banPauseMs = 5 * 60_000;
+        this.throttlePauseMs = 60_000;
+        this.protocolPauseMs = 60_000;
+        this.maxAttemptsPerHour = 25;
         this._attemptTimestamps = [];
 
         const s = loadSettings();
@@ -165,7 +166,6 @@ export class AgentProcess {
         }
         if (kind === 'throttle') return this.throttlePauseMs;
         if (kind === 'offline') {
-            // 45s, then 60s, then 90s max
             const steps = Math.min(this._offlineStreak, 2);
             return Math.min(this.offlineWaitMs + steps * 15_000, this.offlineWaitMaxMs);
         }
@@ -175,8 +175,9 @@ export class AgentProcess {
                 Math.min(this.minBackoffMs * Math.pow(1.5, Math.min(this.restartAttempts, 4)), this.maxBackoffMs)
             );
         }
+        // generic / fail after a short life: retry faster so it does not look "dead"
         const exp = Math.min(
-            this.minBackoffMs * Math.pow(1.5, Math.min(this.restartAttempts - 1, 6)),
+            this.minBackoffMs * Math.pow(1.4, Math.min(this.restartAttempts - 1, 5)),
             this.maxBackoffMs
         );
         return Math.max(this.minBackoffMs, exp);
@@ -246,13 +247,13 @@ export class AgentProcess {
         this._recentStderr = '';
 
         if (!this._canAttempt()) {
-            const wait = 5 * 60_000; // 5 min cool-down (was 30)
+            const wait = 5 * 60_000;
             console.log(`[DreamBot] Many joins this hour — pause ${Math.round(wait / 60000)} min.`);
             this._restartTimer = setTimeout(() => {
                 this._restartTimer = null;
                 if (!this.shouldRun) return;
                 this._attemptTimestamps = [];
-                this.start(true, 'Agent reconnect after cool-down.', this.count_id);
+                this.start(true, null, this.count_id);
             }, wait);
             return;
         }
@@ -327,7 +328,7 @@ export class AgentProcess {
             this._restartTimer = setTimeout(() => {
                 this._restartTimer = null;
                 if (!this.shouldRun) return;
-                this.start(true, 'Agent reconnected after disconnect.', this.count_id);
+                this.start(true, null, this.count_id);
             }, delay);
         });
 
@@ -364,14 +365,14 @@ export class AgentProcess {
             this.process.once('exit', () => {
                 clearTimeout(restartTimeout);
                 setTimeout(() => {
-                    this.start(true, 'Agent process force restarted.', this.count_id);
+                    this.start(true, null, this.count_id);
                 }, this.minBackoffMs);
             });
             try {
                 this.process.kill('SIGINT');
             } catch (_) {}
         } else {
-            this.start(true, 'Agent process restarted.', this.count_id);
+            this.start(true, null, this.count_id);
         }
     }
 }
