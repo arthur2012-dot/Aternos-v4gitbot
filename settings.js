@@ -8,7 +8,7 @@ const settings = {
     "base_profile": "survival",
     "profiles": ["./profiles/dream.json"],
     "load_memory": true,
-    "init_message": "!selfPrompt(\"Sobreviver: madeira, tools, comida, casa longe do spawn, ferro, portal. Se preso destravar. Sempre escolha a proxima acao.\")",
+    "init_message": "!selfPrompt(\"Voce e um player survival. Progrida: madeira, tools, comida, casa. Se tiver subida faca torre de blocos. Se tiver buraco faca ponte. Se preso destranque. Nunca diga que e bot. Sempre a proxima acao com comando.\")",
     "only_chat_with": [],
     "speak": false,
     "chat_ingame": true,
@@ -25,7 +25,7 @@ const settings = {
         "!newAction"
     ],
     "code_timeout_mins": -1,
-    "relevant_docs_count": 3,
+    "relevant_docs_count": 5,
     "max_messages": 8,
     "num_examples": 0,
     "max_commands": 2,
@@ -33,7 +33,7 @@ const settings = {
     "narrate_behavior": false,
     "chat_bot_messages": false,
     "spawn_timeout": 120,
-    "block_place_delay": 50,
+    "block_place_delay": 40,
     "log_all_prompts": false,
 };
 export default settings;
