@@ -1,7 +1,7 @@
 const settings = {
     minecraft_version: "1.21.11",
-    host: "DarkFantasytxt.aternos.me",
-    port: 25831,
+    host: process.env.MC_HOST || "DarkFantasytxt.aternos.me",
+    port: Number(process.env.MC_PORT) || 25831,
     auth: "offline",
     mindserver_port: Number(process.env.PORT) || 8080,
     auto_open_ui: false,
@@ -25,15 +25,15 @@ const settings = {
         "!newAction",
     ],
     code_timeout_mins: -1,
-    relevant_docs_count: 5,
-    max_messages: 8,
+    relevant_docs_count: 4,
+    max_messages: 6,
     num_examples: 0,
     max_commands: 2,
     show_command_syntax: "never",
     narrate_behavior: false,
     chat_bot_messages: false,
     spawn_timeout: 120,
-    block_place_delay: 40,
+    block_place_delay: 35,
     log_all_prompts: false,
 };
 

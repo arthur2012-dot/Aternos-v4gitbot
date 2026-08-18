@@ -1,10 +1,13 @@
 /**
- * Remove Hello world on spawn, start selfPrompt, silence Exiting, soft unstuck.
+ * No Hello world, continuous self-prompt, silent exit, soft unstuck.
  */
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
 const ROOT = process.cwd();
+
+const SELF_PROMPT =
+  'Joga survival humano: madeira tools comida casa ferro explorar. Se preso pillar ou bridge ou cava pra cima. Sempre uma acao !comando. Nunca diga que e bot. Continua sem parar.';
 
 function patchAgent() {
   const p = join(ROOT, 'src', 'agent', 'agent.js');
@@ -17,14 +20,31 @@ function patchAgent() {
   if (src.includes('Hello world! I am')) {
     src = src.replace(
       /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/g,
-      `// DreamBot: no Hello world — start survival self-prompt
+      `// DreamBot: silent spawn + self-prompt loop
             try {
                 if (this.self_prompter && !this.self_prompter.isActive()) {
-                    this.self_prompter.start('Survive like a human: wood tools food explore mine. Pillar or bridge if stuck. Always next !command. Never say you are a bot.');
+                    this.self_prompter.start(${JSON.stringify(SELF_PROMPT)});
                 }
             } catch (e) { console.warn('[DreamBot] selfPrompt start failed', e.message); }`
     );
     console.log('[patch-agent-spawn] removed Hello world');
+  }
+
+  // Also start self-prompt after spawn if not already (backup)
+  if (!src.includes('DreamBot backup self-prompt') && src.includes("this.bot.once('spawn'")) {
+    src = src.replace(
+      /this\.bot\.once\(['"]spawn['"]\s*,\s*async\s*\(\)\s*=>\s*\{/,
+      `this.bot.once('spawn', async () => {
+            // DreamBot backup self-prompt
+            setTimeout(() => {
+                try {
+                    if (this.self_prompter && !this.self_prompter.isActive()) {
+                        this.self_prompter.start(${JSON.stringify(SELF_PROMPT)});
+                    }
+                } catch (_) {}
+            }, 3000);`
+    );
+    console.log('[patch-agent-spawn] backup self-prompt on spawn');
   }
 
   if (/this\.bot\.chat\(code > 1 \? ['"]Restarting\.['"]\s*:\s*['"]Exiting\.['"]\)/.test(src)) {
