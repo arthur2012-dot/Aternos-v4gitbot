@@ -18,3 +18,9 @@
          });
          this.bot.on('kicked', (reason) => {
              if (!this._disconnectHandled) {
++                const reasonStr = typeof reason === 'string' ? reason : JSON.stringify(reason);
++                console.log('[DreamBot] Kicked by server:', reasonStr);
++                // Mark so reconnect layer can apply long ban/throttle delay
++                try {
++                    process.stderr.write('[DreamBot][KICK] ' + reasonStr + '\n');
++                } catch (e) {}
