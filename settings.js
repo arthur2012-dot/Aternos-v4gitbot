@@ -1,8 +1,8 @@
 const settings = {
-    // true = auto-detect from server (best for Paper 26.1 / 1.21.x)
-    // If login fails, set to "1.21.4" or "1.21.11" and lower Aternos version
+    // true = auto-detect version from server
     "minecraft_version": false,
     "host": "DarkFantasytxt.aternos.me",
+    // If Aternos changes the port after restart, update this value (check Aternos panel)
     "port": 31082,
     "auth": "offline",
     "mindserver_port": Number(process.env.PORT) || 8081,
@@ -11,6 +11,7 @@ const settings = {
     "profiles": ["./profiles/dream.json"],
     "load_memory": true,
     "init_message": "",
+    // empty = talk to everyone (except we keep chat quiet via profile)
     "only_chat_with": [],
     "speak": false,
     "chat_ingame": true,
@@ -19,17 +20,16 @@ const settings = {
     "show_bot_views": false,
     "allow_insecure_coding": false,
     "allow_vision": false,
-    "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"],
+    "blocked_actions": ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"],
     "code_timeout_mins": -1,
     "relevant_docs_count": 5,
     "max_messages": 15,
-    // 0 = disable example embeddings (Groq has no embeddings -> was crashing on chat)
     "num_examples": 0,
     "max_commands": -1,
     "show_command_syntax": "full",
     "narrate_behavior": false,
     "chat_bot_messages": false,
-    "spawn_timeout": 60,
+    "spawn_timeout": 90,
     "block_place_delay": 80,
     "log_all_prompts": false,
 };

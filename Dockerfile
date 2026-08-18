@@ -15,9 +15,13 @@ RUN apt-get update && \
 
 WORKDIR /app
 
+# Bust cache when reconnect logic changes
+ARG DREAMBOT_BUILD=2026-08-18-reconnect-v2
+
 COPY package.json ./
 COPY scripts ./scripts
 COPY patches ./patches
+COPY stubs ./stubs
 
 RUN npm install --omit=dev
 
@@ -25,7 +29,6 @@ COPY . .
 
 RUN node scripts/fetch-base.js
 
-# Railway injects PORT; default 8081 for local
 ENV PORT=8081
 EXPOSE 8081
 
