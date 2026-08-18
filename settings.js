@@ -23,7 +23,8 @@ const settings = {
     "code_timeout_mins": -1,
     "relevant_docs_count": 5,
     "max_messages": 15,
-    "num_examples": 2,
+    // 0 = disable example embeddings (Groq has no embeddings -> was crashing on chat)
+    "num_examples": 0,
     "max_commands": -1,
     "show_command_syntax": "full",
     "narrate_behavior": false,
