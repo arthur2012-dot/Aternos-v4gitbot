@@ -1,26 +1,62 @@
 --- src/agent/agent.js
 +++ src/agent/agent.js
-@@ -463,8 +463,15 @@
-             }
-         });
-         this.bot.on('death', () => {
--            this.actions.cancelResume();
--            this.actions.stop();
-+            console.log('[DreamBot] Death detected — clearing actions and pathfinder.');
-+            try { this.actions.cancelResume(); this.actions.stop(); } catch (e) {}
+@@ -107,6 +107,29 @@
+             process.exit(1);
+         }, spawnTimeoutDuration * 1000);
+         this.bot.once('spawn', async () => {
++            // DreamBot idle sprint: if standing still, walk a bit
++            setInterval(() => {
++                try {
++                    const bot = this.bot;
++                    if (!bot?.entity || this.actions?.executing) return;
++                    if (bot.lastDamageTime && Date.now() - bot.lastDamageTime < 5000) return;
++                    const v = bot.entity.velocity;
++                    if (v && Math.abs(v.x) + Math.abs(v.z) > 0.05) return;
++                    bot.setControlState('sprint', true);
++                    bot.setControlState('forward', true);
++                    setTimeout(() => {
++                        try { bot.setControlState('forward', false); bot.setControlState('sprint', false); } catch (_) {}
++                    }, 800);
++                } catch (_) {}
++            }, 15000);
++            setInterval(() => {
++                try {
++                    if (this.self_prompter && !this.self_prompter.isActive() && this.isIdle()) {
++                        this.self_prompter.start('Move, collect, craft tools, place blocks if needed. Sprint. Never only attack.');
++                    }
++                } catch (_) {}
++            }, 35000);
++
+             try {
+                 clearTimeout(spawnTimeout);
+                 addBrowserViewer(this.bot, count_id);
+@@ -214,7 +237,11 @@
+             await this.handleMessage('system', init_message, 2);
+         }
+         else {
+-            this.openChat("Hello world! I am "+this.name);
 +            try {
-+                if (this.bot.pathfinder) {
-+                    this.bot.pathfinder.setGoal(null);
-+                    this.bot.pathfinder.stop();
++                if (this.self_prompter && !this.self_prompter.isActive()) {
++                    this.self_prompter.start('Survive: wood tools food, collect craft place, move with sprint. Never say bot.');
 +                }
 +            } catch (e) {}
-+            try { this.bot.clearControlStates(); } catch (e) {}
-         });
-         this.bot.on('kicked', (reason) => {
-             if (!this._disconnectHandled) {
-+                const reasonStr = typeof reason === 'string' ? reason : JSON.stringify(reason);
-+                console.log('[DreamBot] Kicked by server:', reasonStr);
-+                // Mark so reconnect layer can apply long ban/throttle delay
-+                try {
-+                    process.stderr.write('[DreamBot][KICK] ' + reasonStr + '\n');
-+                } catch (e) {}
+         }
+     }
+ 
+@@ -529,9 +556,13 @@
+     
+ 
+     cleanKill(msg='Killing agent process...', code=1) {
+-        this.history.add('system', msg);
+-        this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
+-        this.history.save();
++        // DreamBot: never spam Exiting/Restarting in chat
++        console.warn('[DreamBot] cleanKill:', msg, code);
++        try { this.history.add('system', msg); this.history.save(); } catch (_) {}
++        if (/stuck|unstuck|not spawned/i.test(String(msg))) {
++            console.warn('[DreamBot] soft fail — stay in game');
++            return;
++        }
+         process.exit(code);
+     }
+     async checkTaskDone() {
