@@ -1,5 +1,5 @@
 /**
- * Clone official mindcraft, apply DreamBot patches, force MC 1.21.11.
+ * Clone mindcraft, DreamBot patches, sprint pathfinder, force MC 1.21.11.
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -35,30 +35,45 @@ function copyStub(fromRel, toRel) {
 
 function softPathfinderPatch(mcPath) {
   let src = readFileSync(mcPath, 'utf8');
-  if (src.includes('DreamBot soft pathfinder')) return false;
-  const inject = `
+  if (src.includes('DreamBot soft pathfinder')) {
+    // still ensure sprint inject once
+  } else {
+    const inject = `
     // DreamBot soft pathfinder
     const _pfSetup = () => {
         if (!bot.pathfinder || bot._dreamSoftPath) return;
         bot._dreamSoftPath = true;
+        try {
+          const pf = require('mineflayer-pathfinder');
+          const movements = new pf.Movements(bot);
+          movements.canDig = true;
+          movements.allow1by1towers = true;
+          movements.allowParkour = true;
+          movements.allowSprinting = true;
+          bot.pathfinder.setMovements(movements);
+        } catch (_) {}
         const origGoto = bot.pathfinder.goto.bind(bot.pathfinder);
         bot.pathfinder.goto = async (goal) => {
             try {
+                try { bot.setControlState('sprint', true); } catch (_) {}
                 return await origGoto(goal);
             } catch (e) {
                 const msg = String(e && (e.message || e.name || e));
                 if (/PathStopped|GoalChanged|path was stopped|goal was changed/i.test(msg)) return;
                 throw e;
+            } finally {
+                try { bot.setControlState('sprint', false); } catch (_) {}
             }
         };
     };
     if (bot.entity) _pfSetup();
     else bot.once('spawn', _pfSetup);
 `;
-  if (src.includes('const bot = createBot(options)')) {
-    src = src.replace('const bot = createBot(options);', 'const bot = createBot(options);' + inject);
-    writeFileSync(mcPath, src);
-    return true;
+    if (src.includes('const bot = createBot(options)')) {
+      src = src.replace('const bot = createBot(options);', 'const bot = createBot(options);' + inject);
+      writeFileSync(mcPath, src);
+      return true;
+    }
   }
   return false;
 }
@@ -147,7 +162,7 @@ try {
     console.warn('[fetch-base] mcdata failed:', e.message);
   }
 
-  for (const script of ['patch-mindserver.js', 'patch-unstuck.js', 'patch-agent-spawn.js']) {
+  for (const script of ['patch-mindserver.js', 'patch-unstuck.js', 'patch-agent-spawn.js', 'patch-sprint-move.js']) {
     try { run('node "' + join(ROOT, 'scripts', script) + '"'); } catch (e) {
       console.warn('[fetch-base]', script, e.message);
     }

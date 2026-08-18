@@ -1,5 +1,5 @@
 /**
- * Dream-style bridge hint in self-prompt + no Exiting.
+ * Self-prompt with sprint/movement + no Exiting.
  */
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -7,7 +7,7 @@ import { join } from 'path';
 const ROOT = process.cwd();
 
 const SELF_PROMPT =
-  'Gear rapido + shelter. PONTE: placeBlock linha com dirt/cobble/planks; no fim sprint e PULA pro destino na beirada pra economizar bloco (nao pule no vazio). Gap 1-2: so pulo se seguro. Pillar no pe pra subir. equip bloco antes. NAO so attack. 2-4 !comandos.';
+  'SEMPRE se mexa: sprint ao andar. collectBlocks log/stone, craft tools, placeBlock bridge/pillar, goToNearestBlock ou goToSurface se parado. equip tool. NAO fique idle. NAO so attack. 2-4 !comandos que te movam.';
 
 function patchAgent() {
   const p = join(ROOT, 'src', 'agent', 'agent.js');
@@ -59,7 +59,7 @@ function patchAgent() {
                         this.self_prompter.start(${JSON.stringify(SELF_PROMPT)});
                     }
                 } catch (_) {}
-            }, 35000);`
+            }, 30000);`
     );
   }
 
@@ -81,7 +81,7 @@ function patchAgent() {
                         this.self_prompter.start(${JSON.stringify(SELF_PROMPT)});
                     }
                 } catch (_) {}
-            }, 35000);`
+            }, 30000);`
     );
   }
 
@@ -102,7 +102,6 @@ function patchModes() {
   src = src.replace(/say\(agent,\s*'I\\'m free\.'\);/g, 'console.log("[DreamBot] free");');
   src = src.replace(/say\(agent,\s*"I'm free\."\);/g, 'console.log("[DreamBot] free");');
   writeFileSync(p, src);
-  console.log('[patch-agent-spawn] modes done');
 }
 
 try {
