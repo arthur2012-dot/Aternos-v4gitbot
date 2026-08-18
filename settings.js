@@ -33,3 +33,9 @@ const settings = {
     "log_all_prompts": false,
 };
 export default settings;
+
+// Expose host/port for the offline-queue waiter (agent_process)
+if (typeof process !== 'undefined') {
+    process.env.MC_HOST = process.env.MC_HOST || settings.host;
+    process.env.MC_PORT = process.env.MC_PORT || String(settings.port);
+}

@@ -2,16 +2,31 @@ import { spawn } from 'child_process';
 import { logoutAgent } from '../mindcraft/mindserver.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 /**
- * DreamBot agent process with anti-ban reconnect for Aternos.
- * - Never spams login (long exponential backoff)
- * - Detects ban / kick / rate-limit and waits much longer
- * - Caps attempts per hour
- * - Persists last disconnect reason
+ * DreamBot agent process:
+ * - Waits patiently when Aternos is offline / starting / in queue
+ * - Pings server before joining (no blind login spam)
+ * - Long backoff on ban/throttle/protocol errors
  */
 const STATE_DIR = join(process.cwd(), 'bots');
 const STATE_FILE = join(STATE_DIR, 'reconnect_state.json');
+
+function loadSettings() {
+    try {
+        // settings.js is ESM default export — dynamic import is async; use require via createRequire on a CJS bridge if needed
+        // Fall back to env / defaults
+        return {
+            host: process.env.MC_HOST || 'DarkFantasytxt.aternos.me',
+            port: Number(process.env.MC_PORT) || 31082,
+        };
+    } catch (_) {
+        return { host: 'DarkFantasytxt.aternos.me', port: 31082 };
+    }
+}
 
 function loadState() {
     try {
@@ -19,7 +34,7 @@ function loadState() {
             return JSON.parse(readFileSync(STATE_FILE, 'utf8'));
         }
     } catch (_) {}
-    return { attempts: 0, lastBanAt: 0, lastFailAt: 0, lastReason: '' };
+    return { attempts: 0, lastBanAt: 0, lastFailAt: 0, lastReason: '', offlineStreak: 0 };
 }
 
 function saveState(state) {
@@ -50,6 +65,19 @@ function classifyDisconnect(code, signal, recentLogs = '') {
         return 'throttle';
     }
     if (
+        text.includes('econnrefused') ||
+        text.includes('enotfound') ||
+        text.includes('etimedout') ||
+        text.includes('ehostunreach') ||
+        text.includes('connect econnrefused') ||
+        text.includes('getaddrinfo') ||
+        text.includes('server is offline') ||
+        text.includes('unable to connect') ||
+        text.includes('connection timed out')
+    ) {
+        return 'offline';
+    }
+    if (
         text.includes('unsupported protocol') ||
         text.includes('protocol version') ||
         text.includes('minecraftversion') ||
@@ -62,6 +90,46 @@ function classifyDisconnect(code, signal, recentLogs = '') {
     return 'generic';
 }
 
+/**
+ * Ping Aternos. Returns { online, version, players } or { online: false, reason }.
+ * Does NOT log in — only status probe.
+ */
+function pingServer(host, port, timeoutMs = 8000) {
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = (result) => {
+            if (settled) return;
+            settled = true;
+            resolve(result);
+        };
+
+        const timer = setTimeout(() => {
+            done({ online: false, reason: 'timeout' });
+        }, timeoutMs);
+
+        try {
+            const mc = require('minecraft-protocol');
+            mc.ping({ host, port, closeTimeout: timeoutMs }, (err, result) => {
+                clearTimeout(timer);
+                if (err) {
+                    done({ online: false, reason: err.code || err.message || 'ping_error' });
+                    return;
+                }
+                done({
+                    online: true,
+                    version: result?.version?.name || 'unknown',
+                    protocol: result?.version?.protocol,
+                    players: result?.players,
+                    description: result?.description,
+                });
+            });
+        } catch (e) {
+            clearTimeout(timer);
+            done({ online: false, reason: e.message || 'no_minecraft_protocol' });
+        }
+    });
+}
+
 export class AgentProcess {
     constructor(name, port) {
         this.name = name;
@@ -71,14 +139,24 @@ export class AgentProcess {
         this._restartTimer = null;
         this._startedAt = 0;
         this._recentStderr = '';
-        // Aternos-friendly limits
-        this.minBackoffMs = 60_000;      // 1 min minimum
-        this.maxBackoffMs = 20 * 60_000; // 20 min max
-        this.banCooldownMs = 60 * 60_000;    // 1 hour after ban-like kick
-        this.throttlePauseMs = 15 * 60_000; // 15 min after throttle
-        this.protocolPauseMs = 5 * 60_000;  // 5 min after protocol errors
+        this._offlineStreak = 0;
+
+        // Offline / queue wait: check every 2–3 min (not aggressive)
+        this.offlineWaitMs = 2 * 60_000; // 2 min between pings when offline
+        this.offlineWaitMaxMs = 5 * 60_000; // up to 5 min if offline a long time
+
+        // After failed join (server was up but login failed)
+        this.minBackoffMs = 60_000;
+        this.maxBackoffMs = 20 * 60_000;
+        this.banPauseMs = 60 * 60_000;
+        this.throttlePauseMs = 15 * 60_000;
+        this.protocolPauseMs = 5 * 60_000;
         this.maxAttemptsPerHour = 8;
         this._attemptTimestamps = [];
+
+        const s = loadSettings();
+        this.mcHost = s.host;
+        this.mcPort = s.port;
     }
 
     _pruneAttempts() {
@@ -96,19 +174,20 @@ export class AgentProcess {
         const now = Date.now();
 
         if (kind === 'ban' || (state.lastBanAt && now - state.lastBanAt < this.banPauseMs)) {
-            const left = Math.max(this.banPauseMs - (now - (state.lastBanAt || now)), this.banPauseMs);
-            return left;
+            return Math.max(this.banPauseMs - (now - (state.lastBanAt || now)), this.banPauseMs);
         }
         if (kind === 'throttle') return this.throttlePauseMs;
+        if (kind === 'offline') {
+            // Patient queue: 2 min, then 3, then 4, max 5
+            const steps = Math.min(this._offlineStreak, 3);
+            return Math.min(this.offlineWaitMs + steps * 60_000, this.offlineWaitMaxMs);
+        }
         if (kind === 'protocol') {
-            // protocol errors: do not hammer the server
             return Math.max(
                 this.protocolPauseMs,
                 Math.min(this.minBackoffMs * Math.pow(1.8, Math.min(this.restartAttempts, 5)), this.maxBackoffMs)
             );
         }
-
-        // generic: exponential backoff, min 1 min
         const exp = Math.min(
             this.minBackoffMs * Math.pow(1.7, Math.min(this.restartAttempts - 1, 8)),
             this.maxBackoffMs
@@ -116,23 +195,82 @@ export class AgentProcess {
         return Math.max(this.minBackoffMs, exp);
     }
 
+    /**
+     * Wait until Aternos answers ping (server online), then start agent.
+     * This is the "queue" — we only join when the server is actually up.
+     */
+    async waitUntilOnline() {
+        while (this.shouldRun) {
+            console.log(
+                `[DreamBot] Checking if server is online: ${this.mcHost}:${this.mcPort} ...`
+            );
+            const status = await pingServer(this.mcHost, this.mcPort);
+
+            if (status.online) {
+                this._offlineStreak = 0;
+                console.log(
+                    `[DreamBot] Server ONLINE (version: ${status.version || '?'}). Joining...`
+                );
+                return status;
+            }
+
+            this._offlineStreak += 1;
+            const wait = this._delayFor('offline');
+            console.log(
+                `[DreamBot] Server offline / starting / in queue (${status.reason || 'no response'}). ` +
+                    `Waiting in line ${Math.round(wait / 1000)}s (check #${this._offlineStreak})...`
+            );
+
+            const state = loadState();
+            state.lastReason = 'offline';
+            state.offlineStreak = this._offlineStreak;
+            state.lastFailAt = Date.now();
+            saveState(state);
+
+            await new Promise((r) => {
+                this._restartTimer = setTimeout(() => {
+                    this._restartTimer = null;
+                    r();
+                }, wait);
+            });
+        }
+        return null;
+    }
+
     start(load_memory = false, init_message = null, count_id = 0) {
         this.count_id = count_id;
-        this.running = true;
         this.shouldRun = true;
-        this._startedAt = Date.now();
-        this._recentStderr = '';
 
         if (this._restartTimer) {
             clearTimeout(this._restartTimer);
             this._restartTimer = null;
         }
 
+        // Always wait for online before spawning the heavy agent process
+        this.waitUntilOnline()
+            .then((status) => {
+                if (!this.shouldRun || !status) return;
+                this._spawnAgent(load_memory, init_message, count_id);
+            })
+            .catch((e) => {
+                console.error('[DreamBot] waitUntilOnline error:', e.message);
+                const delay = this._delayFor('offline');
+                this._restartTimer = setTimeout(() => {
+                    this._restartTimer = null;
+                    if (this.shouldRun) this.start(load_memory, init_message, count_id);
+                }, delay);
+            });
+    }
+
+    _spawnAgent(load_memory, init_message, count_id) {
+        this.running = true;
+        this._startedAt = Date.now();
+        this._recentStderr = '';
+
         if (!this._canAttempt()) {
-            const wait = 30 * 60_000; // 30 min cool-down
+            const wait = 30 * 60_000;
             console.log(
-                `[DreamBot] Too many join attempts in the last hour (${this.maxAttemptsPerHour}). ` +
-                    `Cooling down ${Math.round(wait / 60000)} min to avoid Aternos ban.`
+                `[DreamBot] Too many join attempts this hour. Cooling down ${Math.round(wait / 60000)} min.`
             );
             this._restartTimer = setTimeout(() => {
                 this._restartTimer = null;
@@ -158,12 +296,11 @@ export class AgentProcess {
         if (load_memory) args.push('-l', 'true');
         if (init_message) args.push('-m', init_message);
 
-        console.log('[DreamBot] Starting agent process (anti-ban mode)...');
+        console.log('[DreamBot] Starting agent process...');
         const agentProcess = spawn(process.execPath || 'node', args, {
             stdio: ['ignore', 'inherit', 'pipe'],
         });
 
-        // Capture stderr so we can classify ban / protocol errors
         if (agentProcess.stderr) {
             agentProcess.stderr.on('data', (chunk) => {
                 const s = chunk.toString();
@@ -184,7 +321,6 @@ export class AgentProcess {
                 return;
             }
 
-            // Mindcraft task exit codes > 1 = intentional stop
             if (code !== null && code > 1) {
                 console.log(`[DreamBot] Task ended with code ${code}`);
                 process.exit(code);
@@ -200,42 +336,37 @@ export class AgentProcess {
             state.lastFailAt = Date.now();
             state.lastReason = kind;
             if (kind === 'ban') state.lastBanAt = Date.now();
+            if (kind === 'offline') this._offlineStreak += 1;
             saveState(state);
 
-            // If it died in under 30s, treat as failed login (don't reset backoff)
             if (aliveMs > 120_000) {
-                // survived 2+ minutes in-game → reset soft counter
                 this.restartAttempts = Math.max(0, this.restartAttempts - 2);
             }
 
-            let delay = this._delayFor(kind);
+            const delay = this._delayFor(kind);
 
-            if (kind === 'ban') {
+            if (kind === 'offline') {
                 console.log(
-                    '[DreamBot] Possible BAN/kick detected. ' +
-                        `Waiting ${Math.round(delay / 60000)} min. ` +
-                        'Check Aternos panel → Players / Bans and unban DreamBot if needed.'
+                    `[DreamBot] Server went offline. Back to queue — next check in ${Math.round(delay / 1000)}s.`
+                );
+            } else if (kind === 'ban') {
+                console.log(
+                    `[DreamBot] Possible BAN. Waiting ${Math.round(delay / 60000)} min. Unban DreamBot in Aternos panel if needed.`
                 );
             } else if (kind === 'throttle') {
-                console.log(
-                    `[DreamBot] Rate-limit / throttle suspected. Waiting ${Math.round(delay / 60000)} min.`
-                );
+                console.log(`[DreamBot] Throttle suspected. Waiting ${Math.round(delay / 60000)} min.`);
             } else if (kind === 'protocol') {
-                console.log(
-                    `[DreamBot] Protocol/version issue. Waiting ${Math.round(delay / 60000)} min before retry ` +
-                        '(avoids Aternos join spam).'
-                );
+                console.log(`[DreamBot] Protocol issue. Waiting ${Math.round(delay / 60000)} min.`);
             } else {
                 console.log(
-                    `[DreamBot] Disconnect. Reconnecting in ${Math.round(delay / 1000)}s ` +
-                        `(try ${this.restartAttempts}, kind=${kind}).`
+                    `[DreamBot] Disconnect (${kind}). Retry in ${Math.round(delay / 1000)}s (try ${this.restartAttempts}).`
                 );
             }
 
             this._restartTimer = setTimeout(() => {
                 this._restartTimer = null;
                 if (!this.shouldRun) return;
-                console.log('[DreamBot] Restarting agent now...');
+                // Always go through waitUntilOnline again
                 this.start(true, 'Agent reconnected after disconnect.', this.count_id);
             }, delay);
         });
@@ -266,15 +397,12 @@ export class AgentProcess {
         if (this.running && this.process && !this.process.killed) {
             console.log(`[DreamBot] Force restart ${this.name}...`);
             const restartTimeout = setTimeout(() => {
-                console.warn(`[DreamBot] Agent ${this.name} stuck; killing.`);
                 try {
                     this.process.kill('SIGKILL');
                 } catch (_) {}
             }, 8000);
-
             this.process.once('exit', () => {
                 clearTimeout(restartTimeout);
-                // Force restart still respects min delay
                 setTimeout(() => {
                     this.start(true, 'Agent process force restarted.', this.count_id);
                 }, this.minBackoffMs);
