@@ -1,5 +1,5 @@
 /**
- * DreamBot fetch-base: clone Mindcraft, apply fixes in pure JS (no fragile .patch files).
+ * DreamBot fetch-base: Mindcraft + reliable JS fixes (no broken .patch files).
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -13,14 +13,12 @@ const FORCED_VERSION = process.env.MC_VERSION || '1.21.11';
 function run(cmd, opts = {}) {
   execSync(cmd, { stdio: 'inherit', shell: true, ...opts });
 }
-
 function writeStub(relPath, content) {
   const full = join(ROOT, relPath);
   mkdirSync(dirname(full), { recursive: true });
   writeFileSync(full, content);
   console.log('[fetch-base] stub:', relPath);
 }
-
 function copyStub(fromRel, toRel) {
   const from = join(ROOT, fromRel);
   const to = join(ROOT, toRel);
@@ -28,11 +26,9 @@ function copyStub(fromRel, toRel) {
   mkdirSync(dirname(to), { recursive: true });
   writeFileSync(to, readFileSync(from, 'utf8'));
 }
-
 function read(rel) {
   return readFileSync(join(ROOT, rel), 'utf8');
 }
-
 function write(rel, content) {
   const full = join(ROOT, rel);
   mkdirSync(dirname(full), { recursive: true });
@@ -71,7 +67,6 @@ function refreshCoreFromUpstream() {
     'src/agent/modes.js',
     'src/agent/library/skills.js',
     'src/agent/self_prompter.js',
-    'src/models/cerebras.js',
     'src/utils/mcdata.js',
   ]) {
     const from = join(TMP, rel);
@@ -83,40 +78,38 @@ function refreshCoreFromUpstream() {
   }
 }
 
-/** Apply all DreamBot behavior fixes with string edits (reliable on Railway). */
 function applyDreamBotFixes() {
-  // ---- agent.js ----
   let agent = read('src/agent/agent.js');
 
-  // 1) No Hello world; start self-prompt instead
+  // No Hello world → self-prompt
   if (agent.includes('Hello world! I am')) {
     agent = agent.replace(
       /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/,
       `try {
             if (this.self_prompter && !this.self_prompter.isActive()) {
-                this.self_prompter.start('Survive: collect wood, craft tools, mine, place blocks. Never mention API.');
+                this.self_prompter.start('Survive: wood, craft table, pickaxe, mine stone, place blocks if stuck. Never mention API.');
             }
         } catch (e) {}`
     );
-    console.log('[fetch-base] agent: no Hello world + self-prompt');
+    console.log('[fetch-base] agent: self-prompt start');
   }
 
-  // 2) openChat silence filter
+  // openChat silence
   if (!agent.includes('[DreamBot] suppressed chat')) {
     agent = agent.replace(
       /async openChat\(message\) \{/,
       `async openChat(message) {
         const __m = String(message || '');
         if (!__m.trim()) return;
-        if (/groq|cerebras|rate.?limit|429|tarifa|indispon|passivo|passive|artesanato|did not use command|n[aã]o usou o comando|stopping auto|parando a solicita|brain disconnected|try again|api key|modo pass|continue passive|unavailable|continue passivo|restarting|exiting|hello world/i.test(__m)) {
-            console.warn('[DreamBot] suppressed chat:', __m.slice(0, 100));
+        if (/groq|cerebras|deepseek|rate.?limit|429|tarifa|indispon|passivo|passive|artesanato|did not use command|n[aã]o usou o comando|stopping auto|parando|brain disconnected|try again|api key|modo pass|unavailable|restarting|exiting|hello world/i.test(__m)) {
+            console.warn('[DreamBot] suppressed chat:', __m.slice(0, 80));
             return;
         }`
     );
-    console.log('[fetch-base] agent: openChat silence');
+    console.log('[fetch-base] agent: chat silence');
   }
 
-  // 3) cleanKill: no Exiting chat; soft-fail on stuck
+  // cleanKill soft on stuck
   if (agent.includes("this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.')")) {
     agent = agent.replace(
       /cleanKill\(msg='Killing agent process\.\.\.', code=1\) \{\s*this\.history\.add\('system', msg\);\s*this\.bot\.chat\(code > 1 \? 'Restarting\.': 'Exiting\.'\);\s*this\.history\.save\(\);\s*process\.exit\(code\);\s*\}/,
@@ -125,99 +118,107 @@ function applyDreamBotFixes() {
         try { this.history.add('system', msg); this.history.save(); } catch (_) {}
         if (/stuck|unstuck|not spawned/i.test(String(msg))) {
             console.warn('[DreamBot] soft fail — stay in game');
+            try {
+              if (this.self_prompter && !this.self_prompter.isActive()) {
+                setTimeout(() => {
+                  try { this.self_prompter.start('Unstuck then collect wood and craft tools.'); } catch(_){}
+                }, 5000);
+              }
+            } catch(_){}
             return;
         }
         process.exit(code);
     }`
     );
-    console.log('[fetch-base] agent: cleanKill fixed');
+    console.log('[fetch-base] agent: cleanKill soft');
   }
 
-  // 4) Passive survival loop on spawn (no AI needed)
+  // Spawn: passive loop + self-prompt watchdog + aggressive unstuck dig
   if (!agent.includes('[DreamBot] passive loop')) {
     agent = agent.replace(
       /this\.bot\.once\('spawn', async \(\) => \{\s*try \{\s*clearTimeout\(spawnTimeout\);/,
       `this.bot.once('spawn', async () => {
-            // Passive survival without LLM
+            // PASSIVE: dig/move without AI every 10s
             setInterval(async () => {
                 try {
                     const bot = this.bot;
                     if (!bot?.entity || this.actions?.executing) return;
-                    if (bot.lastDamageTime && Date.now() - bot.lastDamageTime < 3000) return;
+                    if (bot.lastDamageTime && Date.now() - bot.lastDamageTime < 2500) return;
                     const skills = await import('./library/skills.js');
                     try { await skills.pickupNearbyItems(bot); } catch (_) {}
                     if (bot.health < 10) {
                         try { await skills.defendSelf(bot, 8); } catch (_) {}
                         return;
                     }
-                    const inv = bot.inventory.items();
-                    const hasPick = inv.some(i => /pickaxe/i.test(i.name));
-                    const logCount = inv.filter(i => /_log$/i.test(i.name)).reduce((a, i) => a + i.count, 0);
-                    if (!hasPick && logCount < 8) {
-                        const kinds = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log'];
-                        let done = false;
-                        for (const k of kinds) {
-                            try { await skills.collectBlock(bot, k, 2); done = true; break; } catch (_) {}
-                        }
-                        if (!done) {
-                            try {
-                                const block = bot.findBlock({ matching: (b) => b && /_log$/i.test(b.name), maxDistance: 16 });
-                                if (block) { try { await bot.dig(block); } catch (_) {} }
-                                else { try { await skills.moveAway(bot, 10); } catch (_) {} }
-                            } catch (_) {}
-                        }
-                        return;
+                    // Dig nearest log without long path (less stuck)
+                    const log = bot.findBlock({ matching: (b) => b && /_log$/i.test(b.name), maxDistance: 12 });
+                    if (log) {
+                        try {
+                          await bot.lookAt(log.position.offset(0.5, 0.5, 0.5));
+                          await bot.dig(log);
+                          return;
+                        } catch (_) {}
                     }
-                    if (hasPick) {
-                        try { await skills.collectBlock(bot, 'stone', 4); } catch (_) {
-                            try { await skills.moveAway(bot, 8); } catch (_) {}
-                        }
-                        return;
+                    const stone = bot.findBlock({ matching: (b) => b && (b.name === 'stone' || b.name === 'cobblestone'), maxDistance: 8 });
+                    if (stone && bot.inventory.items().some(i => /pickaxe/i.test(i.name))) {
+                        try { await bot.dig(stone); return; } catch (_) {}
                     }
-                    try { await skills.moveAway(bot, 6); } catch (_) {}
+                    // Unstuck: jump + dig block above head + move
+                    try {
+                      bot.setControlState('jump', true);
+                      bot.setControlState('forward', true);
+                      bot.setControlState('sprint', true);
+                      const above = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+                      if (above && above.name !== 'air' && above.diggable !== false) {
+                        try { await bot.dig(above); } catch (_) {}
+                      }
+                      setTimeout(() => {
+                        try {
+                          bot.setControlState('jump', false);
+                          bot.setControlState('forward', false);
+                          bot.setControlState('sprint', false);
+                        } catch (_) {}
+                      }, 600);
+                    } catch (_) {}
                 } catch (e) {
                     console.warn('[DreamBot] passive loop', e.message);
                 }
-            }, 12000);
+            }, 10000);
+
+            // Watchdog: if self-prompt died, restart every 40s
             setInterval(() => {
                 try {
-                    const bot = this.bot;
-                    if (!bot?.entity || this.actions?.executing) return;
-                    const v = bot.entity.velocity;
-                    if (v && Math.abs(v.x) + Math.abs(v.z) > 0.04) return;
-                    bot.setControlState('sprint', true);
-                    bot.setControlState('forward', true);
-                    setTimeout(() => {
-                        try { bot.setControlState('forward', false); bot.setControlState('sprint', false); } catch (_) {}
-                    }, 800);
-                } catch (_) {}
-            }, 15000);
+                    if (!this.self_prompter) return;
+                    if (this.self_prompter.isActive && this.self_prompter.isActive()) return;
+                    console.log('[DreamBot] restarting self-prompt');
+                    this.self_prompter.start('Continue survival: collect wood nearby, craft tools, do not stop.');
+                } catch (e) {
+                    console.warn('[DreamBot] self-prompt restart', e.message);
+                }
+            }, 40000);
 
             try {
                 clearTimeout(spawnTimeout);`
     );
-    console.log('[fetch-base] agent: passive survival loop');
+    console.log('[fetch-base] agent: passive + watchdog');
   }
 
   write('src/agent/agent.js', agent);
 
-  // ---- modes.js: unstuck must not kill process / chat Exiting ----
+  // modes: never kill on stuck
   let modes = read('src/agent/modes.js');
-  if (modes.includes('Got stuck and could not recover')) {
-    modes = modes.replace(
-      /this\.agent\.cleanKill\([^)]*Got stuck[^)]*\)/g,
-      `console.warn('[DreamBot] stuck recovery — not exiting'); try { this.agent.bot.setControlState('jump', true); setTimeout(() => { try { this.agent.bot.setControlState('jump', false); } catch(_){} }, 400); } catch(_){}`
-    );
-    console.log('[fetch-base] modes: unstuck no kill');
-  }
-  // also catch generic cleanKill from unstuck mode if different wording
+  modes = modes.replace(
+    /this\.agent\.cleanKill\([^)]*[Ss]tuck[^)]*\)/g,
+    `console.warn('[DreamBot] stuck recovery'); try { const b=this.agent.bot; b.setControlState('jump',true); b.setControlState('forward',true); setTimeout(()=>{try{b.setControlState('jump',false);b.setControlState('forward',false);}catch(_){}},500);}catch(_){}`
+  );
   modes = modes.replace(
     /agent\.cleanKill\(['"][^'"]*stuck[^'"]*['"][^)]*\)/gi,
     `console.warn('[DreamBot] stuck — stay online')`
   );
   write('src/agent/modes.js', modes);
+  console.log('[fetch-base] modes: unstuck');
 
-  // ---- skills.js: sprint on goto ----
+  // skills sprint
   let skills = read('src/agent/library/skills.js');
   if (skills.includes('goToGoal') && !skills.includes('[DreamBot] sprint')) {
     skills = skills.replace(
@@ -227,25 +228,25 @@ function applyDreamBotFixes() {
 `
     );
     write('src/agent/library/skills.js', skills);
-    console.log('[fetch-base] skills: sprint');
   }
 
-  // ---- self_prompter: don't stop permanently ----
+  // self_prompter: almost never stop; auto-resume
   let sp = read('src/agent/self_prompter.js');
-  if (sp.includes('MAX_NO_COMMAND = 3')) {
-    sp = sp.replace('MAX_NO_COMMAND = 3', 'MAX_NO_COMMAND = 20');
-  }
+  sp = sp.replace(/MAX_NO_COMMAND = \d+/, 'MAX_NO_COMMAND = 50');
   if (sp.includes('Stopping auto-prompting')) {
     sp = sp.replace(
       /let out = `Agent did not use command[\s\S]*?this\.state = STOPPED;/,
-      `console.warn('[DreamBot] self-prompt pause (no chat)');
-                    this.state = PAUSED;`
+      `console.warn('[DreamBot] self-prompt soft pause');
+                    this.state = PAUSED;
+                    setTimeout(() => { try { if (this.state === PAUSED) this.start(this.prompt || 'Survive and collect wood.'); } catch(_){} }, 15000);`
     );
   }
+  // if it sets STOPPED elsewhere on no command, soften
+  sp = sp.replace(/this\.state = STOPPED;/g, 'this.state = PAUSED; /* DreamBot keep alive */');
   write('src/agent/self_prompter.js', sp);
-  console.log('[fetch-base] self_prompter softened');
+  console.log('[fetch-base] self_prompter hardened');
 
-  // ---- mcdata: force version ----
+  // mcdata version
   let mc = read('src/utils/mcdata.js');
   if (!mc.includes('DreamBot: NEVER delete version')) {
     const forceBlock = `// DreamBot: NEVER delete version
@@ -255,32 +256,9 @@ function applyDreamBotFixes() {
       /if\s*\(\s*!mc_version\s*\|\|\s*mc_version\s*===\s*['"]auto['"]\s*\)\s*\{[\s\S]*?delete\s+options\.version;[\s\S]*?\}/m,
       forceBlock
     );
-    // also if version is false
-    if (mc.includes("mc_version === false") || mc.includes('mc_version === false')) {
-      mc = mc.replace(
-        /if\s*\([^)]*mc_version[^)]*\)\s*\{[\s\S]*?delete\s+options\.version;[\s\S]*?\}/m,
-        forceBlock
-      );
-    }
     write('src/utils/mcdata.js', mc);
-    console.log('[fetch-base] mcdata: force', FORCED_VERSION);
   }
 
-  // ---- cerebras: silent errors (empty string, no chat spam) ----
-  const cerebrasPath = join(ROOT, 'src/models/cerebras.js');
-  if (existsSync(cerebrasPath)) {
-    let cb = readFileSync(cerebrasPath, 'utf8');
-    if (cb.includes('My brain disconnected')) {
-      cb = cb.replace(
-        /res = 'My brain disconnected, try again\.';/,
-        `res = ''; console.warn('[DreamBot] Cerebras error — silent passive');`
-      );
-      write('src/models/cerebras.js', cb);
-      console.log('[fetch-base] cerebras: silent errors');
-    }
-  }
-
-  // Keep profile model as cerebras (don't overwrite user's dream.json from upstream)
   console.log('[fetch-base] DreamBot fixes applied');
 }
 
@@ -311,30 +289,19 @@ try {
       '',
     ].join('\n')
   );
-  writeStub(
-    'src/agent/vision/browser_viewer.js',
-    'export function addBrowserViewer() {}\nexport function addViewer() {}\nexport default { addBrowserViewer, addViewer };\n'
-  );
-  writeStub(
-    'src/agent/vision/camera.js',
-    "import { EventEmitter } from 'events';\nexport class Camera extends EventEmitter {\n  constructor(bot, fp) { super(); this.bot = bot; this.fp = fp; this.disabled = true; setImmediate(() => this.emit('ready')); }\n  async capture() { return null; }\n}\n"
-  );
-  writeStub(
-    'src/agent/vision/vision_interpreter.js',
-    "export class VisionInterpreter {\n  constructor(agent) { this.agent = agent; this.allow_vision = false; this.camera = null; }\n  async lookAtPlayer() { return 'Vision disabled'; }\n  async lookAtPosition() { return 'Vision disabled'; }\n  getCenterBlockInfo() { return 'No block'; }\n  async analyzeImage() { return 'Vision disabled'; }\n}\n"
-  );
+  writeStub('src/agent/vision/browser_viewer.js', 'export function addBrowserViewer() {}\nexport function addViewer() {}\nexport default { addBrowserViewer, addViewer };\n');
+  writeStub('src/agent/vision/camera.js', "import { EventEmitter } from 'events';\nexport class Camera extends EventEmitter {\n  constructor(bot, fp) { super(); this.bot = bot; this.fp = fp; this.disabled = true; setImmediate(() => this.emit('ready')); }\n  async capture() { return null; }\n}\n");
+  writeStub('src/agent/vision/vision_interpreter.js', "export class VisionInterpreter {\n  constructor(agent) { this.agent = agent; this.allow_vision = false; this.camera = null; }\n  async lookAtPlayer() { return 'Vision disabled'; }\n  async lookAtPosition() { return 'Vision disabled'; }\n  getCenterBlockInfo() { return 'No block'; }\n  async analyzeImage() { return 'Vision disabled'; }\n}\n");
   copyStub('stubs/math.js', 'src/utils/math.js');
   copyStub('stubs/examples.js', 'src/utils/examples.js');
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
 
   const ms = join(ROOT, 'scripts', 'patch-mindserver.js');
   if (existsSync(ms)) {
-    try {
-      run('node "' + ms + '"');
-    } catch (_) {}
+    try { run('node "' + ms + '"'); } catch (_) {}
   }
 
-  console.log('[fetch-base] Ready. version=', FORCED_VERSION, 'AI=cerebras/gpt-oss-120b');
+  console.log('[fetch-base] Ready. version=', FORCED_VERSION, 'AI=groq/gpt-oss-20b');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);
