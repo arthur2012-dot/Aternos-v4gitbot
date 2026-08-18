@@ -1,5 +1,5 @@
 /**
- * Progression-first, place blocks when stuck, no Exiting chat.
+ * Progression + house build self-prompt, no Exiting.
  */
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -7,7 +7,7 @@ import { join } from 'path';
 const ROOT = process.cwd();
 
 const SELF_PROMPT =
-  'PROGRESSO obrigatorio agora: se tem log craft planks mesa stick wooden_pickaxe. Se tem pickaxe collectBlocks stone ou coal_ore. Se buraco placeBlock dirt ou cobblestone na frente (bridge). Se subida placeBlock no pe (pillar). equip tool certa. NAO so attack mob. 2-3 !comandos de progresso.';
+  'Ordem: 1 tools madeira/pedra 2 CASA: placeBlock paredes chao teto com dirt/cobble/planks 4x4 altura 3, torch, rememberHere base 3 so depois mine iron explore. equip pickaxe pra stone. bridge se buraco. NAO so attack. 2-3 !comandos.';
 
 function patchAgent() {
   const p = join(ROOT, 'src', 'agent', 'agent.js');
@@ -31,7 +31,6 @@ function patchAgent() {
       src = src.replace(
         cleanKillRe,
         `cleanKill(msg='Killing agent process...', code=1) {
-        // DreamBot hard cleanKill
         console.warn('[DreamBot] cleanKill:', msg, code);
         try { this.history.add('system', String(msg)); this.history.save(); } catch (_) {}
         if (/stuck|unstuck|Exiting|not spawned/i.test(String(msg))) {
@@ -62,7 +61,7 @@ function patchAgent() {
                         this.self_prompter.start(${JSON.stringify(SELF_PROMPT)});
                     }
                 } catch (_) {}
-            }, 45000);`
+            }, 40000);`
     );
   }
 
@@ -96,60 +95,14 @@ function patchModes() {
   const p = join(ROOT, 'src', 'agent', 'modes.js');
   if (!existsSync(p)) return;
   let src = readFileSync(p, 'utf8');
-
-  // never cleanKill on stuck
   src = src.replace(
     /agent\.cleanKill\(["']Got stuck and couldn't get unstuck["']\)/g,
-    'console.warn("[DreamBot] stuck — place/bridge try")'
+    'console.warn("[DreamBot] stuck — stay")'
   );
-
-  // Replace unstuck execute body to try placing a block (bridge/pillar) when stuck
-  if (!src.includes('DreamBot unstuck place') && src.includes("I'm stuck")) {
-    // inject place attempt before moveAway if we find the execute block
-    const marker = 'await skills.moveAway(bot, 5)';
-    if (src.includes(marker) && !src.includes('DreamBot unstuck place')) {
-      src = src.replace(
-        marker,
-        `// DreamBot unstuck place: try pillar/bridge block then move
-                    try {
-                        const inv = bot.inventory.items();
-                        const blockItem = inv.find(i =>
-                            i.name.includes('dirt') || i.name.includes('cobble') ||
-                            i.name.includes('planks') || i.name.includes('netherrack') ||
-                            i.name === 'stone' || i.name.includes('log')
-                        );
-                        if (blockItem) {
-                            await bot.equip(blockItem, 'hand').catch(() => {});
-                            const ref = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-                            if (ref) {
-                                await bot.placeBlock(ref, new (await import('vec3')).Vec3(0, 1, 0)).catch(() => {});
-                            }
-                            const yaw = bot.entity.yaw;
-                            const fx = -Math.sin(yaw);
-                            const fz = -Math.cos(yaw);
-                            const front = bot.blockAt(bot.entity.position.offset(Math.round(fx), -1, Math.round(fz)));
-                            if (front) {
-                                await bot.placeBlock(front, new (await import('vec3')).Vec3(0, 1, 0)).catch(() => {});
-                            }
-                        }
-                        bot.setControlState('jump', true);
-                        await new Promise(r => setTimeout(r, 300));
-                        bot.setControlState('jump', false);
-                    } catch (e) { console.warn('[DreamBot] unstuck place failed', e.message); }
-                    await skills.moveAway(bot, 5)`
-      );
-      console.log('[patch-agent-spawn] unstuck place inject');
-    }
-  }
-
   src = src.replace(/say\(agent,\s*'I\\'m stuck!'\);/g, 'console.log("[DreamBot] unstuck");');
   src = src.replace(/say\(agent,\s*"I'm stuck!"\);/g, 'console.log("[DreamBot] unstuck");');
   src = src.replace(/say\(agent,\s*'I\\'m free\.'\);/g, 'console.log("[DreamBot] free");');
   src = src.replace(/say\(agent,\s*"I'm free\."\);/g, 'console.log("[DreamBot] free");');
-
-  // Soften self_defense: don't interrupt if we can avoid — change interrupts from all if present
-  // Keep defense but hunting already off in profile
-
   writeFileSync(p, src);
   console.log('[patch-agent-spawn] modes done');
 }
