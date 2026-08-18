@@ -8,13 +8,13 @@ try {
     console.warn('keys.json not found. Using environment variables only.');
 }
 
-/** Env vars override keys.json. */
 export function getKey(name) {
     const aliases = {
         GROQCLOUD_API_KEY: ['GROQCLOUD_API_KEY', 'GROQ_API_KEY'],
         CEREBRAS_API_KEY: ['CEREBRAS_API_KEY'],
         GEMINI_API_KEY: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
         OPENROUTER_API_KEY: ['OPENROUTER_API_KEY'],
+        DEEPSEEK_API_KEY: ['DEEPSEEK_API_KEY'],
     };
     const names = aliases[name] || [name];
 
@@ -28,9 +28,7 @@ export function getKey(name) {
             return String(keys[n]).trim();
         }
     }
-    throw new Error(
-        `API key "${name}" not found. Set it in keys.json or Railway Variables.`
-    );
+    throw new Error(`API key "${name}" not found. Set DEEPSEEK_API_KEY in Railway Variables.`);
 }
 
 export function hasKey(name) {
