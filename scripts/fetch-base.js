@@ -1,5 +1,6 @@
 /**
- * DreamBot = Mindcraft + survival progression worker (techtree-like without task system)
+ * DreamBot = Mindcraft + terrain adaptation + survival worker
+ * Pathfinder digs/climbs; obstacle loop digs walls and jumps steps.
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -71,12 +72,13 @@ function refresh() {
 }
 
 function applyFixes() {
+  // —— modes: never kill self-prompt; soft stuck ——
   let modes = read('src/agent/modes.js');
   modes = modes.replace(
     /if\s*\(\s*agent\.self_prompter\.isActive\(\)\s*\)\s*\n?\s*agent\.self_prompter\.stopLoop\(\);/,
     '// DreamBot: keep self-prompt'
   );
-  modes = modes.replace(/max_stuck_time:\s*20/, 'max_stuck_time: 55');
+  modes = modes.replace(/max_stuck_time:\s*20/, 'max_stuck_time: 60');
   modes = modes.replace(
     /agent\.cleanKill\(["']Got stuck[^"']*["']\)/g,
     `console.warn('[DreamBot] stuck — stay online')`
@@ -89,7 +91,7 @@ function applyFixes() {
       if (agent.self_prompter && !agent.self_prompter.isActive()) {
         setTimeout(() => {
           try { agent.self_prompter.start(agent.self_prompter.prompt || 'Survive with !commands'); } catch {}
-        }, 6000);
+        }, 5000);
       }
     } catch {}
     if (should_reprompt) {`
@@ -97,11 +99,28 @@ function applyFixes() {
   }
   write('src/agent/modes.js', modes);
 
+  // —— skills: soft PathStopped + sprint + dig-friendly path ——
   let skills = read('src/agent/library/skills.js');
   if (!skills.includes('[DreamBot] soft PathStopped')) {
     skills = skills.replace(
       /try \{\s*await bot\.pathfinder\.goto\(goal\);\s*clearInterval\(doorCheckInterval\);\s*return true;\s*\} catch \(err\) \{\s*clearInterval\(doorCheckInterval\);\s*\/\/[^\n]*\n\s*throw err;\s*\}/,
       `try {
+        try {
+          const pf = await import('mineflayer-pathfinder');
+          const Movements = pf.Movements || pf.default?.Movements;
+          if (Movements && bot.pathfinder) {
+            const m = new Movements(bot);
+            m.canDig = true;
+            m.allowSprinting = true;
+            m.allowParkour = true;
+            m.allow1by1towers = true;
+            m.maxDropDown = 4;
+            m.digCost = 1;
+            m.placeCost = 1;
+            try { m.canOpenDoors = true; } catch {}
+            bot.pathfinder.setMovements(m);
+          }
+        } catch {}
         try { bot.setControlState('sprint', true); } catch {}
         await bot.pathfinder.goto(goal);
         clearInterval(doorCheckInterval);
@@ -109,12 +128,24 @@ function applyFixes() {
     } catch (err) {
         clearInterval(doorCheckInterval);
         // [DreamBot] soft PathStopped
-        if (/PathStopped|NoPath|Timeout|path/i.test(String(err?.message || err))) {
+        if (/PathStopped|NoPath|Timeout|path|GoalChanged/i.test(String(err?.message || err))) {
             console.warn('[DreamBot] PathStopped ok');
             return false;
         }
         throw err;
     }`
+    );
+  }
+  // collectBlock: ignore PathStopped mid-collect
+  if (!skills.includes('[DreamBot] collect soft')) {
+    skills = skills.replace(
+      /console\.log\(err\);\s*\/\/ log pathfinder errors for debugging/g,
+      `// [DreamBot] collect soft
+            if (/PathStopped|NoPath|Timeout|GoalChanged/i.test(String(err?.message || err))) {
+                console.warn('[DreamBot] collect path interrupted, continue');
+            } else {
+                console.log(err);
+            }`
     );
   }
   write('src/agent/library/skills.js', skills);
@@ -125,7 +156,7 @@ function applyFixes() {
       /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/,
       `try {
             if (this.self_prompter && !this.self_prompter.isActive()) {
-                this.self_prompter.start('Survive: wood, craft tools, mine, food, shelter. Always !command.');
+                this.self_prompter.start('Survive: wood, craft, mine, food. Always end with !command.');
             }
         } catch {}`
     );
@@ -154,96 +185,214 @@ function applyFixes() {
     );
   }
 
-  // FULL survival progression worker (Mindcraft techtree-like, no LLM required)
-  if (!agent.includes('[DreamBot] survival worker')) {
+  // Terrain + survival worker
+  if (!agent.includes('[DreamBot] terrain worker')) {
     agent = agent.replace(
       /this\.bot\.once\('spawn', async \(\) => \{\s*try \{\s*clearTimeout\(spawnTimeout\);/,
       `this.bot.once('spawn', async () => {
+            try {
+                clearTimeout(spawnTimeout);
+            } catch {}
             try {
                 const pf = await import('mineflayer-pathfinder');
                 const Movements = pf.Movements || pf.default?.Movements;
                 if (Movements) {
                     const m = new Movements(this.bot);
+                    m.canDig = true;
                     m.allowSprinting = true;
                     m.allowParkour = true;
                     m.allow1by1towers = true;
-                    m.canDig = true;
                     m.maxDropDown = 4;
+                    m.digCost = 1;
+                    m.placeCost = 1;
+                    try { m.canOpenDoors = true; } catch {}
                     this.bot.pathfinder.setMovements(m);
-                    console.log('[DreamBot] pathfinder ON');
+                    console.log('[DreamBot] pathfinder dig+parkour+sprint ON');
                 }
             } catch (e) { console.warn('[DreamBot] pathfinder', e.message); }
 
-            // Save home on first spawn
             try {
                 if (!this._homePos && this.bot.entity) {
                     this._homePos = this.bot.entity.position.clone();
-                    console.log('[DreamBot] home set', this._homePos);
                 }
             } catch {}
 
+            // TERRAIN ADAPTATION every 2.5s: dig wall, jump step, climb
             setInterval(async () => {
                 try {
                     const bot = this.bot;
-                    if (!bot?.entity || this.actions?.executing) return;
+                    if (!bot?.entity) return;
+                    const pos = bot.entity.position;
+                    const yaw = bot.entity.yaw;
+                    const dx = -Math.sin(yaw);
+                    const dz = -Math.cos(yaw);
+                    const fx = Math.floor(pos.x + dx * 1.2);
+                    const fz = Math.floor(pos.z + dz * 1.2);
+                    const fy = Math.floor(pos.y);
+
+                    const blockAt = (x, y, z) => {
+                        try { return bot.blockAt(new bot.Vec3(x, y, z)); } catch { return null; }
+                    };
+                    // Vec3 may be on bot or via vec3 package
+                    let Vec3 = bot.Vec3;
+                    try { if (!Vec3) Vec3 = (await import('vec3')).default || (await import('vec3')).Vec3; } catch {}
+                    if (!Vec3) return;
+
+                    const feet = bot.blockAt(new Vec3(fx, fy, fz));
+                    const head = bot.blockAt(new Vec3(fx, fy + 1, fz));
+                    const aboveHead = bot.blockAt(new Vec3(fx, fy + 2, fz));
+                    const step = bot.blockAt(new Vec3(fx, fy, fz));
+                    const aboveStep = bot.blockAt(new Vec3(fx, fy + 1, fz));
+
+                    const solid = (b) => b && b.name !== 'air' && b.name !== 'cave_air' && b.name !== 'void_air'
+                        && !b.name.includes('water') && !b.name.includes('lava')
+                        && b.boundingBox === 'block';
+
+                    // Wall at head height → dig it (don't bash forever)
+                    if (solid(head) && bot.canDigBlock?.(head) !== false) {
+                        try {
+                            console.log('[DreamBot] dig wall', head.name);
+                            await bot.dig(head);
+                            return;
+                        } catch {}
+                    }
+                    // Block at feet blocking path, free above → jump over 1-block step
+                    if (solid(feet) && !solid(aboveStep) && !solid(aboveHead)) {
+                        try {
+                            bot.setControlState('jump', true);
+                            bot.setControlState('forward', true);
+                            bot.setControlState('sprint', true);
+                            setTimeout(() => {
+                                try {
+                                    bot.setControlState('jump', false);
+                                    bot.setControlState('forward', false);
+                                    bot.setControlState('sprint', false);
+                                } catch {}
+                            }, 400);
+                            console.log('[DreamBot] jump step');
+                            return;
+                        } catch {}
+                    }
+                    // Tall wall: dig feet block too
+                    if (solid(feet) && solid(head)) {
+                        try {
+                            if (bot.canDigBlock?.(feet) !== false) {
+                                console.log('[DreamBot] dig obstacle', feet.name);
+                                await bot.dig(feet);
+                                return;
+                            }
+                        } catch {}
+                    }
+                    // Block above head while moving (ceiling) → dig
+                    const ceil = bot.blockAt(new Vec3(Math.floor(pos.x), fy + 2, Math.floor(pos.z)));
+                    if (solid(ceil) && bot.entity.velocity && Math.abs(bot.entity.velocity.y) > 0.05) {
+                        try { await bot.dig(ceil); } catch {}
+                    }
+                } catch (e) {
+                    // ignore
+                }
+            }, 2500);
+
+            // If velocity ~0 for a bit while trying to move, dig forward or turn
+            let stillTicks = 0;
+            let lastPos = null;
+            setInterval(() => {
+                try {
+                    const bot = this.bot;
+                    if (!bot?.entity) return;
+                    const p = bot.entity.position;
+                    if (lastPos && p.distanceTo(lastPos) < 0.15) {
+                        stillTicks++;
+                    } else {
+                        stillTicks = 0;
+                    }
+                    lastPos = p.clone();
+                    if (stillTicks >= 3) {
+                        stillTicks = 0;
+                        // turn a bit and jump+sprint
+                        bot.look(bot.entity.yaw + (Math.random() > 0.5 ? 0.8 : -0.8), 0);
+                        bot.setControlState('jump', true);
+                        bot.setControlState('forward', true);
+                        bot.setControlState('sprint', true);
+                        setTimeout(() => {
+                            try {
+                                bot.setControlState('jump', false);
+                                bot.setControlState('forward', false);
+                                bot.setControlState('sprint', false);
+                            } catch {}
+                        }, 500);
+                        console.log('[DreamBot] unstick turn+jump');
+                    }
+                } catch {}
+            }, 2000);
+
+            // SURVIVAL WORKER every 12s
+            setInterval(async () => {
+                try {
+                    const bot = this.bot;
+                    if (!bot?.entity) return;
+                    if (this.actions?.executing) return;
                     if (bot.pathfinder?.isMoving?.()) return;
                     console.log('[DreamBot] survival worker');
                     try { bot.modes?.pause?.('unstuck'); } catch {}
                     const skills = await import('./library/skills.js');
                     const inv = bot.inventory.items();
-                    const count = (n) => inv.filter(i => i.name === n || (n.endsWith('_log') && /_log$/.test(i.name))).reduce((a,i)=>a+i.count,0);
-                    const has = (n) => inv.some(i => i.name === n || (typeof n === 'object' && n.test?.(i.name)));
-                    const logs = inv.filter(i => /_log$/.test(i.name)).reduce((a,i)=>a+i.count,0);
-                    const planks = inv.filter(i => /_planks$/.test(i.name)).reduce((a,i)=>a+i.count,0);
+                    const count = (n) => inv.filter(i => i.name === n).reduce((a, i) => a + i.count, 0);
+                    const has = (n) => inv.some(i => i.name === n);
+                    const logs = inv.filter(i => /_log$/.test(i.name)).reduce((a, i) => a + i.count, 0);
+                    const planks = inv.filter(i => /_planks$/.test(i.name)).reduce((a, i) => a + i.count, 0);
                     const hasTable = has('crafting_table');
                     const hasPick = inv.some(i => /pickaxe/.test(i.name));
-                    const hasAxe = inv.some(i => /_axe$/.test(i.name) && !/pickaxe/.test(i.name));
                     const sticks = count('stick');
                     const cobble = count('cobblestone') + count('stone');
 
-                    // 1) Need wood
-                    if (logs < 6 && !hasPick) {
+                    if (logs < 8 && !hasPick) {
                         for (const k of ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log']) {
-                            try { if (await skills.collectBlock(bot, k, 3)) { console.log('[DreamBot] wood', k); return; } } catch {}
+                            try {
+                                if (await skills.collectBlock(bot, k, 4)) {
+                                    console.log('[DreamBot] wood', k);
+                                    return;
+                                }
+                            } catch {}
                         }
-                        const log = bot.findBlock({ matching: b => b && /_log$/.test(b.name), maxDistance: 12 });
-                        if (log) { try { await bot.dig(log); return; } catch {} }
+                        const log = bot.findBlock({ matching: b => b && /_log$/.test(b.name), maxDistance: 16 });
+                        if (log) {
+                            try {
+                                // walk closer without long path if possible
+                                if (log.position.distanceTo(bot.entity.position) > 4) {
+                                    try { await skills.goToPosition(bot, log.position.x, log.position.y, log.position.z, 2); } catch {}
+                                }
+                                await bot.dig(log);
+                                console.log('[DreamBot] dig log');
+                                return;
+                            } catch {}
+                        }
                     }
 
-                    // 2) Planks
                     if (logs >= 1 && planks < 8) {
                         try {
                             const wood = inv.find(i => /_log$/.test(i.name));
                             if (wood) {
-                                const name = wood.name.replace('_log','_planks').replace('log', 'planks');
-                                // oak_log -> oak_planks
-                                const recipeName = wood.name.includes('log') ? wood.name.replace('_log','_planks') : 'oak_planks';
+                                const recipeName = wood.name.replace('_log', '_planks');
                                 await skills.craftRecipe(bot, recipeName, 2);
-                                console.log('[DreamBot] crafted planks');
+                                console.log('[DreamBot] planks');
                                 return;
                             }
                         } catch (e) { console.warn('[DreamBot] planks', e.message); }
                     }
 
-                    // 3) Crafting table
                     if (!hasTable && planks >= 4) {
                         try {
                             await skills.craftRecipe(bot, 'crafting_table', 1);
-                            console.log('[DreamBot] crafted table');
+                            console.log('[DreamBot] table');
                             return;
                         } catch (e) { console.warn('[DreamBot] table', e.message); }
                     }
 
-                    // 4) Sticks
                     if (sticks < 4 && planks >= 2) {
-                        try {
-                            await skills.craftRecipe(bot, 'stick', 4);
-                            console.log('[DreamBot] sticks');
-                            return;
-                        } catch {}
+                        try { await skills.craftRecipe(bot, 'stick', 4); console.log('[DreamBot] sticks'); return; } catch {}
                     }
 
-                    // 5) Wooden tools
                     if (!hasPick && planks >= 3 && sticks >= 2) {
                         try {
                             await skills.craftRecipe(bot, 'wooden_pickaxe', 1);
@@ -252,25 +401,17 @@ function applyFixes() {
                             return;
                         } catch (e) { console.warn('[DreamBot] pick', e.message); }
                     }
-                    if (!hasAxe && planks >= 3 && sticks >= 2) {
-                        try { await skills.craftRecipe(bot, 'wooden_axe', 1); return; } catch {}
-                    }
 
-                    // 6) Mine stone
                     if (hasPick && cobble < 12) {
                         try {
-                            if (await skills.collectBlock(bot, 'stone', 5)) {
+                            if (await skills.collectBlock(bot, 'stone', 6)) {
                                 console.log('[DreamBot] stone');
                                 return;
                             }
                         } catch {}
-                        try {
-                            if (await skills.collectBlock(bot, 'cobblestone', 5)) return;
-                        } catch {}
                     }
 
-                    // 7) Stone tools
-                    if (cobble >= 3 && sticks >= 2 && !inv.some(i => i.name === 'stone_pickaxe')) {
+                    if (cobble >= 3 && sticks >= 2 && !has('stone_pickaxe')) {
                         try {
                             await skills.craftRecipe(bot, 'stone_pickaxe', 1);
                             await skills.equip(bot, 'stone_pickaxe');
@@ -279,13 +420,12 @@ function applyFixes() {
                         } catch {}
                     }
 
-                    // 8) Food: hunt via skill if hungry
-                    if (bot.food < 16) {
+                    if (bot.food < 14) {
                         try {
-                            for (const mob of ['chicken','cow','pig','sheep']) {
+                            for (const mob of ['chicken', 'cow', 'pig', 'sheep']) {
                                 try {
                                     if (await skills.attackNearest(bot, mob, true)) {
-                                        console.log('[DreamBot] hunted', mob);
+                                        console.log('[DreamBot] hunt', mob);
                                         return;
                                     }
                                 } catch {}
@@ -293,16 +433,17 @@ function applyFixes() {
                         } catch {}
                     }
 
-                    // 9) Night: try bed
                     try {
                         const t = bot.time?.timeOfDay;
                         if (t != null && (t > 13000 || t < 1000)) {
-                            try { await skills.goToBed(bot); console.log('[DreamBot] slept'); return; } catch {}
+                            try { await skills.goToBed(bot); return; } catch {}
                         }
                     } catch {}
 
-                    // 10) Explore
-                    try { await skills.moveAway(bot, 10); console.log('[DreamBot] explore'); } catch {
+                    try {
+                        await skills.moveAway(bot, 12);
+                        console.log('[DreamBot] explore');
+                    } catch {
                         bot.setControlState('forward', true);
                         bot.setControlState('sprint', true);
                         bot.setControlState('jump', true);
@@ -311,28 +452,28 @@ function applyFixes() {
                                 bot.setControlState('jump', false);
                                 bot.setControlState('forward', false);
                                 bot.setControlState('sprint', false);
-                                bot.look(bot.entity.yaw + 0.9, 0);
+                                bot.look(bot.entity.yaw + 1.0, 0);
                             } catch {}
-                        }, 500);
+                        }, 600);
                     }
                     try { bot.modes?.unpause?.('unstuck'); } catch {}
                 } catch (e) {
-                    if (!/PathStopped/i.test(String(e?.message||e)))
+                    if (!/PathStopped/i.test(String(e?.message || e)))
                         console.warn('[DreamBot] survival', e.message);
                 }
-            }, 14000);
+            }, 12000);
 
             setInterval(() => {
                 try {
                     if (!this.self_prompter) return;
                     if (this.self_prompter.isActive?.()) return;
-                    console.log('[DreamBot] self-prompt restart');
-                    this.self_prompter.start('Survive: wood tools stone food shelter. Use !commands.');
+                    this.self_prompter.start('Survive: wood tools stone food. Always !command.');
                 } catch {}
-            }, 50000);
+            }, 45000);
 
             try {
-                clearTimeout(spawnTimeout);`
+                // original clearTimeout already attempted above
+                if (false) clearTimeout(spawnTimeout);`
     );
   }
   write('src/agent/agent.js', agent);
@@ -344,7 +485,7 @@ function applyFixes() {
       /let out = `Agent did not use command[\s\S]*?this\.state = STOPPED;/,
       `console.warn('[DreamBot] soft pause');
                     this.state = PAUSED;
-                    setTimeout(() => { try { this.start(this.prompt || 'Survive'); } catch {} }, 20000);`
+                    setTimeout(() => { try { this.start(this.prompt || 'Survive'); } catch {} }, 15000);`
     );
   }
   sp = sp.replace(/this\.state = STOPPED;/g, 'this.state = PAUSED;');
@@ -361,7 +502,7 @@ function applyFixes() {
     write('src/utils/mcdata.js', mc);
   }
 
-  console.log('[fetch-base] Mindcraft + survival progression applied');
+  console.log('[fetch-base] terrain adaptation + survival applied');
 }
 
 try {
@@ -405,7 +546,7 @@ export class Camera extends EventEmitter {
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
   const ms = join(ROOT, 'scripts', 'patch-mindserver.js');
   if (existsSync(ms)) { try { run(`node "${ms}"`); } catch {} }
-  console.log('[fetch-base] Ready — survival techtree worker');
+  console.log('[fetch-base] Ready — dig walls, jump steps, climb, survival');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);
