@@ -1,15 +1,6 @@
 node_modules/
-package-lock.json
-.vscode/
-.idea/
-code_records/
-scratch.js
-bots/**/action-code/**
-tmp/
-**/.DS_Store
-src/mindcraft-py/__pycache__/
-src/models/logs/*
-
-# secrets — never commit real keys
+.mindcraft-base/
+bots/*/memory.json
+*.log
 .env
-*.pem
+.DS_Store

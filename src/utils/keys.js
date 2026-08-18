@@ -18,17 +18,22 @@ export function getKey(name) {
     };
     const names = aliases[name] || [name];
 
+    // 1) Railway / env
     for (const n of names) {
         if (process.env[n] && String(process.env[n]).trim()) {
             return String(process.env[n]).trim();
         }
     }
+    // 2) keys.json no GitHub
     for (const n of names) {
-        if (keys[n] && String(keys[n]).trim()) {
-            return String(keys[n]).trim();
+        const v = keys[n] && String(keys[n]).trim();
+        if (v && v !== 'COLE_SUA_KEY_AQUI') {
+            return v;
         }
     }
-    throw new Error(`API key "${name}" not found. Set DEEPSEEK_API_KEY in Railway Variables.`);
+    throw new Error(
+        `API key "${name}" not found. Edit keys.json on GitHub and put your DeepSeek key in DEEPSEEK_API_KEY.`
+    );
 }
 
 export function hasKey(name) {
