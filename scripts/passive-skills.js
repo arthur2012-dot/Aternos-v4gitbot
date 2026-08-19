@@ -1,7 +1,6 @@
 /**
  * PASSIVE BRAIN — pure code, no LLM.
- * Fixes: infinite craft-fail loop, missing table for 3x3,
- * hole trap, auto-jump, skip failed recipes for a while.
+ * Tool break: detect missing tools, clear craft cooldown, re-craft ASAP.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -12,7 +11,6 @@ const { goals } = pathfinder;
 const WOOD = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log','pale_oak_log'];
 const FOOD_RE = /cooked_|bread|apple|carrot|potato|beef|pork|chicken|mutton|cod|salmon|melon|sweet_berries|glow_berries/;
 
-// Don't retry the same failed craft for 60s
 const craftCooldown = new Map();
 
 function items(bot) { return bot.inventory.items(); }
@@ -38,10 +36,16 @@ function canTryCraft(name) {
   return Date.now() >= until;
 }
 function markCraftFail(name) {
-  craftCooldown.set(name, Date.now() + 60000); // skip 60s
+  craftCooldown.set(name, Date.now() + 45000);
 }
 function markCraftOk(name) {
   craftCooldown.delete(name);
+}
+/** When a tool breaks, allow re-craft immediately */
+function clearToolCraftCooldown() {
+  for (const k of [...craftCooldown.keys()]) {
+    if (/pickaxe|axe|sword|shovel|hoe/.test(k)) craftCooldown.delete(k);
+  }
 }
 
 async function goto(bot, x, y, z, r = 1) {
@@ -101,7 +105,6 @@ async function collect(bot, names, need, dist = 36) {
     if (d > 3.2) await goto(bot, b.position.x, b.position.y, b.position.z, 2);
     if (await dig(bot, b)) {
       got++;
-      // walk forward a bit to pick drops
       bot.setControlState('forward', true);
       await sleep(250);
       bot.clearControlStates();
@@ -110,19 +113,16 @@ async function collect(bot, names, need, dist = 36) {
   return got > 0;
 }
 
-/** Ensure a crafting table is nearby for 3x3 recipes */
 async function ensureTableNearby(bot) {
   const near = bot.findBlock({ matching: b => b?.name === 'crafting_table', maxDistance: 4 });
   if (near) return near;
 
-  // Place from inventory
   if (has(bot, 'crafting_table')) {
     try {
       const item = items(bot).find(i => i.name === 'crafting_table');
       await bot.equip(item, 'hand');
       const ref = bot.blockAt(bot.entity.position.offset(0, -1, 0));
       if (ref) {
-        // place in front on ground
         const yaw = bot.entity.yaw;
         const fx = Math.round(-Math.sin(yaw));
         const fz = Math.round(-Math.cos(yaw));
@@ -150,13 +150,11 @@ async function craft(bot, recipeName, n = 1) {
       return false;
     }
 
-    // 2x2 recipes (planks, sticks) — no table needed
     const needsTable = !/planks$|^stick$|^torch$/.test(recipeName);
     let table = null;
     if (needsTable) {
       table = await ensureTableNearby(bot);
       if (!table && !has(bot, 'crafting_table')) {
-        // need to craft table first — don't spam pickaxe fails
         markCraftFail(recipeName);
         console.warn('[PASSIVE] no table for', recipeName);
         return false;
@@ -213,16 +211,84 @@ async function equipBest(bot, kind) {
   } catch { return false; }
 }
 
-/** Detect 1-block hole / head blocked — dig out or tower */
+/** Tool almost broken? (durability < 15%) */
+function almostBroken(bot, kindRe) {
+  try {
+    const list = items(bot).filter(i => kindRe.test(i.name));
+    for (const it of list) {
+      const max = it.maxDurability ?? it.durability ?? 0;
+      const used = it.durabilityUsed ?? 0;
+      if (max > 0 && (max - used) / max < 0.15) return true;
+    }
+  } catch {}
+  return false;
+}
+
+/**
+ * If pickaxe/axe/sword is missing (broke), clear cooldown and craft the best available.
+ * Returns true if it started a replace craft.
+ */
+async function replaceBrokenTools(bot) {
+  const planks = countRe(bot, /_planks$/);
+  const sticks = count(bot, 'stick');
+  const cobble = count(bot, 'cobblestone') + count(bot, 'stone');
+  const iron = count(bot, 'iron_ingot');
+  const anyPick = hasRe(bot, /pickaxe/);
+  const anyAxe = hasRe(bot, /_axe$/);
+  const anySword = hasRe(bot, /sword/);
+  const stonePick = hasRe(bot, /stone_pickaxe/);
+  const ironPick = hasRe(bot, /iron_pickaxe/);
+
+  // Tool gone → allow craft again
+  if (!anyPick || !anyAxe || !anySword) {
+    clearToolCraftCooldown();
+  }
+
+  // Priority: pickaxe first (needed for stone)
+  if (!anyPick) {
+    console.log('[PASSIVE] pickaxe BROKEN/missing → replace');
+    if (iron >= 3 && sticks >= 2) {
+      if (await craft(bot, 'iron_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
+    }
+    if (cobble >= 3 && sticks >= 2) {
+      if (await craft(bot, 'stone_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
+    }
+    if (planks >= 3 && sticks >= 2) {
+      if (await craft(bot, 'wooden_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
+    }
+    // No mats → gather wood first next ticks
+    return false;
+  }
+
+  // Spare if almost broken
+  if (almostBroken(bot, /pickaxe/) && !ironPick) {
+    if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_pickaxe', 1)) {
+      console.log('[PASSIVE] spare pickaxe (low durability)');
+      return true;
+    }
+  }
+
+  if (!anyAxe) {
+    console.log('[PASSIVE] axe BROKEN/missing → replace');
+    if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_axe', 1)) return true;
+    if (planks >= 3 && sticks >= 2 && await craft(bot, 'wooden_axe', 1)) return true;
+  }
+
+  if (!anySword) {
+    if (cobble >= 2 && sticks >= 1 && await craft(bot, 'stone_sword', 1)) return true;
+    if (planks >= 2 && sticks >= 1 && await craft(bot, 'wooden_sword', 1)) return true;
+  }
+
+  return false;
+}
+
 async function escapeHole(bot) {
   try {
     const p = bot.entity.position;
-    const feet = bot.blockAt(p.floored());
     const head = bot.blockAt(p.floored().offset(0, 1, 0));
     const above = bot.blockAt(p.floored().offset(0, 2, 0));
     const ground = bot.blockAt(p.floored().offset(0, -1, 0));
 
-    // Head or body blocked (1-high space)
     const headSolid = head && head.boundingBox === 'block';
     const aboveSolid = above && above.boundingBox === 'block';
     const inHole =
@@ -230,7 +296,6 @@ async function escapeHole(bot) {
       (ground && ground.boundingBox === 'block' &&
         bot.entity.position.y - Math.floor(bot.entity.position.y) < 0.2 &&
         (() => {
-          // surrounding walls at feet level
           let walls = 0;
           for (const o of [[1,0],[-1,0],[0,1],[0,-1]]) {
             const b = bot.blockAt(p.floored().offset(o[0], 0, o[1]));
@@ -242,12 +307,9 @@ async function escapeHole(bot) {
     if (!inHole && !headSolid) return false;
 
     console.log('[PASSIVE] escape hole/1-high');
-
-    // 1) Dig head if blocked
     if (headSolid) await dig(bot, head);
     if (aboveSolid) await dig(bot, above);
 
-    // 2) Dig sides to open exit
     for (const o of [[1,0],[-1,0],[0,1],[0,-1]]) {
       const side = bot.blockAt(p.floored().offset(o[0], 0, o[1]));
       const sideUp = bot.blockAt(p.floored().offset(o[0], 1, o[1]));
@@ -255,7 +317,6 @@ async function escapeHole(bot) {
       if (sideUp && sideUp.boundingBox === 'block') await dig(bot, sideUp);
     }
 
-    // 3) Tower up with dirt/cobble if still trapped
     const scaffold = items(bot).find(i =>
       /dirt|cobblestone|netherrack|planks|stone$|andesite|granite|diorite|tuff/.test(i.name)
     );
@@ -277,7 +338,6 @@ async function escapeHole(bot) {
       }
     }
 
-    // 4) Walk out
     bot.setControlState('forward', true);
     bot.setControlState('jump', true);
     await sleep(400);
@@ -288,7 +348,6 @@ async function escapeHole(bot) {
   }
 }
 
-/** Auto-jump like a player when a 1-block step is ahead */
 function enableAutoJump(bot) {
   if (bot._dreamAutoJump) return;
   bot._dreamAutoJump = true;
@@ -315,15 +374,31 @@ function enableAutoJump(bot) {
       }
     } catch {}
   });
-  console.log('[PASSIVE] auto-jump ON (1-block steps)');
+  console.log('[PASSIVE] auto-jump ON');
 }
 
-/** Decision tree */
+/** Watch inventory: tool disappeared → log + clear cooldown */
+function watchToolBreak(bot) {
+  if (bot._dreamToolWatch) return;
+  bot._dreamToolWatch = true;
+  let lastPicks = 0;
+  setInterval(() => {
+    try {
+      if (!bot.entity) return;
+      const picks = items(bot).filter(i => /pickaxe/.test(i.name)).length;
+      if (lastPicks > 0 && picks === 0) {
+        console.log('[PASSIVE] pickaxe broke!');
+        clearToolCraftCooldown();
+      }
+      lastPicks = picks;
+    } catch {}
+  }, 2000);
+}
+
 export async function runPassiveSkillTick(agent) {
   const bot = agent.bot;
   if (!bot?.entity || bot._dreamPvpActive) return;
 
-  // Priority -1 — get out of hole BEFORE other tasks (prevents infinite stuck)
   if (await escapeHole(bot)) return;
 
   const logs = countRe(bot, /_log$/);
@@ -332,12 +407,9 @@ export async function runPassiveSkillTick(agent) {
   const cobble = count(bot, 'cobblestone') + count(bot, 'stone');
   const hasTableItem = has(bot, 'crafting_table');
   const tableNear = !!bot.findBlock({ matching: b => b?.name === 'crafting_table', maxDistance: 6 });
-  const woodPick = hasRe(bot, /wooden_pickaxe/);
+  const anyPick = hasRe(bot, /pickaxe/);
   const stonePick = hasRe(bot, /stone_pickaxe/);
   const ironPick = hasRe(bot, /iron_pickaxe/);
-  const anyPick = hasRe(bot, /pickaxe/);
-  const anyAxe = hasRe(bot, /_axe$/);
-  const anySword = hasRe(bot, /sword/);
   const iron = count(bot, 'iron_ingot');
   const rawIron = count(bot, 'raw_iron');
   const coal = count(bot, 'coal') + count(bot, 'charcoal');
@@ -345,13 +417,14 @@ export async function runPassiveSkillTick(agent) {
 
   if (await eatIfNeeded(bot)) return;
 
-  // Wood
+  // HIGH PRIORITY: replace broken tools before anything else
+  if (await replaceBrokenTools(bot)) return;
+
   if (logs < 8) {
     console.log('[PASSIVE] need wood');
     if (await collect(bot, WOOD, 3, 40)) return;
   }
 
-  // Planks (2x2 — always works)
   if (logs >= 1 && planks < 20) {
     const logItem = items(bot).find(i => /_log$/.test(i.name));
     if (logItem) {
@@ -360,68 +433,47 @@ export async function runPassiveSkillTick(agent) {
     }
   }
 
-  // Crafting table item
   if (!hasTableItem && !tableNear && planks >= 4) {
     if (await craft(bot, 'crafting_table', 1)) return;
   }
-
-  // Place table if we have it but none nearby
   if (hasTableItem && !tableNear) {
     await ensureTableNearby(bot);
   }
 
-  // Sticks
   if (sticks < 12 && planks >= 2) {
     if (await craft(bot, 'stick', 4)) return;
   }
 
-  // Wooden tools — only if no better pick AND canTry
+  // Normal tool progression (only if still missing after replaceBrokenTools)
   if (planks >= 3 && sticks >= 2 && !anyPick && canTryCraft('wooden_pickaxe')) {
     if (await craft(bot, 'wooden_pickaxe', 1)) {
       await equipBest(bot, 'pickaxe');
       return;
     }
   }
-  if (planks >= 3 && sticks >= 2 && !anyAxe && canTryCraft('wooden_axe')) {
-    if (await craft(bot, 'wooden_axe', 1)) return;
-  }
-  if (planks >= 2 && sticks >= 1 && !anySword && canTryCraft('wooden_sword')) {
-    if (await craft(bot, 'wooden_sword', 1)) return;
-  }
 
-  // Mine stone
   if (anyPick && cobble < 24) {
     console.log('[PASSIVE] mine stone');
     await equipBest(bot, 'pickaxe');
     if (await collect(bot, ['stone', 'cobblestone', 'deepslate'], 5, 28)) return;
   }
 
-  // Stone tools — skip if already have or on cooldown
   if (cobble >= 3 && sticks >= 2 && !stonePick && !ironPick && canTryCraft('stone_pickaxe')) {
     if (await craft(bot, 'stone_pickaxe', 1)) {
       await equipBest(bot, 'pickaxe');
       return;
     }
   }
-  if (cobble >= 3 && sticks >= 2 && !hasRe(bot, /stone_axe/) && canTryCraft('stone_axe')) {
-    if (await craft(bot, 'stone_axe', 1)) return;
-  }
-  if (cobble >= 2 && sticks >= 1 && !hasRe(bot, /stone_sword/) && canTryCraft('stone_sword')) {
-    if (await craft(bot, 'stone_sword', 1)) return;
-  }
 
-  // Furnace
   if (cobble >= 8 && !hasFurnace && canTryCraft('furnace')) {
     if (await craft(bot, 'furnace', 1)) return;
   }
 
-  // Ore
   if (stonePick || ironPick) {
     if (coal < 6 && await collect(bot, ['coal_ore', 'deepslate_coal_ore'], 2, 24)) return;
     if (rawIron + iron < 5 && await collect(bot, ['iron_ore', 'deepslate_iron_ore'], 2, 24)) return;
   }
 
-  // Iron pick
   if (iron >= 3 && sticks >= 2 && !ironPick && canTryCraft('iron_pickaxe')) {
     if (await craft(bot, 'iron_pickaxe', 1)) {
       await equipBest(bot, 'pickaxe');
@@ -429,12 +481,10 @@ export async function runPassiveSkillTick(agent) {
     }
   }
 
-  // Torches
   if (coal >= 1 && sticks >= 1 && count(bot, 'torch') < 12 && canTryCraft('torch')) {
     if (await craft(bot, 'torch', 4)) return;
   }
 
-  // Explore — gentle, less anti-cheat spam
   console.log('[PASSIVE] explore');
   const yaw = bot.entity.yaw + (Math.random() > 0.5 ? 0.7 : -0.7);
   try { await bot.look(yaw, 0, true); } catch {}
@@ -449,8 +499,15 @@ export function startPassiveSkills(agent) {
 
   const bot = agent.bot;
   if (bot) {
-    if (bot.entity) enableAutoJump(bot);
-    else bot.once('spawn', () => enableAutoJump(bot));
+    if (bot.entity) {
+      enableAutoJump(bot);
+      watchToolBreak(bot);
+    } else {
+      bot.once('spawn', () => {
+        enableAutoJump(bot);
+        watchToolBreak(bot);
+      });
+    }
   }
 
   const tick = async () => {
@@ -472,5 +529,5 @@ export function startPassiveSkills(agent) {
   setTimeout(tick, 2500);
   setInterval(tick, 6000);
 
-  console.log('[PASSIVE] BRAIN ON — fail cooldown, table place, hole escape, auto-jump');
+  console.log('[PASSIVE] BRAIN ON — tool break replace + fail cooldown + hole + auto-jump');
 }
