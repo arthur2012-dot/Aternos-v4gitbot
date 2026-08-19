@@ -1,8 +1,7 @@
 /**
- * Navigation based on official plugins only:
- * - mineflayer-pathfinder (Movements canDig + scafoldingBlocks)
- * - @miner-org/mineflayer-baritone (ashfinder enableBreaking/Placing)
- * Custom dig only for RESOURCE mining (wood/stone), not pathfighting.
+ * Navigation: mineflayer-pathfinder + optional ashfinder.
+ * Softer movements to reduce Aternos "moved incorrectly" warnings.
+ * Hole unstuck asks pathfinder to climb out — no random AFK jumps.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -35,24 +34,22 @@ async function withTimeout(p, ms) {
   }
 }
 
-/** Official pathfinder Movements — dig/place during pathing */
 function setupPrismarine(bot) {
   try {
     const mcData = require('minecraft-data')(bot.version);
     const m = new Movements(bot);
 
     m.canDig = true;
-    m.digCost = 1;
-    m.placeCost = 1;
+    m.digCost = 1.5; // prefer path around a bit more
+    m.placeCost = 1.2;
     m.allowSprinting = true;
     m.allowParkour = true;
-    m.allow1by1towers = true; // tower with scaffolding
+    m.allow1by1towers = true;
     m.canOpenDoors = true;
-    m.allowFreeMotion = true;
-    m.maxDropDown = 4;
+    m.allowFreeMotion = false; // less rubber-band / anti-cheat
+    m.maxDropDown = 3;
     m.dontMineUnderFallingBlock = true;
 
-    // scaffolding = ITEM ids (official API)
     const scaffoldNames = [
       'dirt', 'cobblestone', 'stone', 'netherrack',
       'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks',
@@ -64,7 +61,6 @@ function setupPrismarine(bot) {
       if (id != null) m.scafoldingBlocks.push(id);
     }
 
-    // avoid breaking valuables
     for (const name of ['crafting_table', 'chest', 'furnace', 'beacon', 'spawner']) {
       const id = mcData.blocksByName[name]?.id;
       if (id != null) m.blocksCantBreak.add(id);
@@ -72,13 +68,12 @@ function setupPrismarine(bot) {
 
     bot.pathfinder.setMovements(m);
     bot.pathfinder.thinkTimeout = 8000;
-    console.log('[NAV] pathfinder Movements: canDig+scaffold+tower');
+    console.log('[NAV] pathfinder softer (less anti-cheat)');
   } catch (e) {
     console.warn('[NAV] pathfinder setup', e.message);
   }
 }
 
-/** Official ashfinder (mineflayer-baritone) */
 async function setupAshfinder(bot) {
   if (bot.ashfinder) {
     configAsh(bot);
@@ -102,7 +97,6 @@ function configAsh(bot) {
   const af = bot.ashfinder;
   if (!af) return;
   try {
-    // Official helpers
     af.enableBreaking?.();
     af.enablePlacing?.();
     const c = af.config || {};
@@ -111,9 +105,9 @@ function configAsh(bot) {
     c.parkour = true;
     c.swimming = true;
     c.proParkour = false;
-    c.maxFallDist = 4;
+    c.maxFallDist = 3;
     c.thinkTimeout = 45000;
-    c.stuckTimeout = 6000;
+    c.stuckTimeout = 7000;
     c.disposableBlocks = [
       'dirt', 'cobblestone', 'stone', 'andesite', 'diorite', 'granite',
       'netherrack', 'oak_planks', 'spruce_planks', 'birch_planks',
@@ -135,33 +129,27 @@ function installDreamGoto(bot) {
     } catch {}
   };
 
-  /** Path with dig/place handled by the plugin, not custom code */
   bot.dreamGoto = async (x, y, z, range = 1) => {
     if (!bot.entity) return false;
     if (inWater(bot)) {
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 25; i++) {
         if (!inWater(bot)) break;
         bot.setControlState('jump', true);
         bot.setControlState('forward', true);
-        await new Promise(r => setTimeout(r, 150));
+        await new Promise(r => setTimeout(r, 120));
       }
       bot.clearControlStates();
     }
 
     const target = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
 
-    // Prefer ashfinder (Baritone-style dig/place in path)
     if (bot.ashfinder) {
       try {
         configAsh(bot);
         const bar = await import('@miner-org/mineflayer-baritone');
         const g = bar.goals || bar.default?.goals;
         if (g?.GoalNear) {
-          await withTimeout(bot.ashfinder.goto(new g.GoalNear(target, range)), 50000);
-          return true;
-        }
-        if (g?.GoalExact) {
-          await withTimeout(bot.ashfinder.goto(new g.GoalExact(target)), 50000);
+          await withTimeout(bot.ashfinder.goto(new g.GoalNear(target, range)), 45000);
           return true;
         }
       } catch (e) {
@@ -169,12 +157,11 @@ function installDreamGoto(bot) {
       }
     }
 
-    // Fallback: prismarine pathfinder (Movements dig/scaffold)
     try {
       setupPrismarine(bot);
       await withTimeout(
         bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, range)),
-        40000
+        35000
       );
       return true;
     } catch (e) {
@@ -189,16 +176,15 @@ function installDreamGoto(bot) {
   };
 }
 
-/** Resource dig only — standard bot.dig, not path override */
 async function resourceDig(bot, block) {
   if (!block) return false;
   try {
-    const items = bot.inventory.items();
+    const inv = bot.inventory.items();
     const n = block.name || '';
     let tool = null;
-    if (/_log$|planks|leaves/.test(n)) tool = items.find(i => /_axe$/.test(i.name));
-    else if (/dirt|sand|gravel|grass/.test(n)) tool = items.find(i => /_shovel$/.test(i.name));
-    else tool = items.find(i => /_pickaxe$/.test(i.name));
+    if (/_log$|planks|leaves/.test(n)) tool = inv.find(i => /_axe$/.test(i.name));
+    else if (/dirt|sand|gravel|grass/.test(n)) tool = inv.find(i => /_shovel$/.test(i.name));
+    else tool = inv.find(i => /_pickaxe$/.test(i.name));
     if (tool) await bot.equip(tool, 'hand');
     await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
     await withTimeout(bot.dig(block), 8000);
@@ -232,6 +218,7 @@ function startPassiveResource(bot, agent) {
     if (agent?.actions?.executing) return;
     if (bot.pathfinder?.isMoving?.()) return;
     if (bot.ashfinder?.path?.length) return;
+    if (agent?._passiveRunning) return; // let passive brain own the tick
     run = true;
     try {
       const inv = bot.inventory.items();
@@ -240,15 +227,14 @@ function startPassiveResource(bot, agent) {
       const cobble = inv.filter(i => /cobblestone|^stone$/.test(i.name)).reduce((s, i) => s + i.count, 0);
 
       let b = null;
-      if (logs < 8) {
+      if (logs < 6) {
         b = find(['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'cherry_log'], 36);
-      } else if (pick && cobble < 16) {
+      } else if (pick && cobble < 12) {
         b = find(['stone', 'cobblestone', 'deepslate'], 24);
       }
       if (!b) return;
 
       console.log('[NAV] resource', b.name);
-      // goto uses pathfinder/ash dig-place for obstacles
       await bot.dreamGoto(b.position.x, b.position.y, b.position.z, 2);
       await resourceDig(bot, b);
     } catch (e) {
@@ -256,17 +242,16 @@ function startPassiveResource(bot, agent) {
     } finally {
       run = false;
     }
-  }, 12000);
+  }, 14000);
 
-  console.log('[NAV] passive resource via pathfinder/ash');
+  console.log('[NAV] passive resource (deferred to passive brain when busy)');
 }
 
-/** Minimal unstuck: only ask pathfinder to move away, no custom dig war */
 function startUnstuck(bot, agent) {
   if (bot._dreamUnstuck) return;
   bot._dreamUnstuck = true;
   let still = 0;
-  let lx = null, lz = null;
+  let lx = null, lz = null, ly = null;
 
   setInterval(async () => {
     try {
@@ -275,23 +260,30 @@ function startUnstuck(bot, agent) {
         still = 0;
         return;
       }
+      if (bot.targetDigBlock) {
+        still = 0;
+        return;
+      }
       const x = bot.entity.position.x;
+      const y = bot.entity.position.y;
       const z = bot.entity.position.z;
-      if (lx != null && Math.abs(x - lx) + Math.abs(z - lz) < 0.08) still++;
+      if (lx != null && Math.abs(x - lx) + Math.abs(z - lz) + Math.abs(y - ly) < 0.12) still++;
       else still = 0;
-      lx = x;
-      lz = z;
+      lx = x; ly = y; lz = z;
 
-      if (still < 6) return; // ~9s
+      if (still < 8) return; // ~12s truly stuck
       still = 0;
-      console.log('[NAV] unstuck → pathfinder GoalNear offset');
-      const yaw = bot.entity.yaw;
-      const tx = bot.entity.position.x - Math.sin(yaw) * 4;
-      const tz = bot.entity.position.z - Math.cos(yaw) * 4;
-      const ty = bot.entity.position.y;
+      console.log('[NAV] unstuck → GoalY / nearby');
+
+      // Prefer climb up if in hole (higher Y nearby)
+      const upY = Math.floor(y) + 2;
       try {
-        await bot.dreamGoto(tx, ty, tz, 1);
-      } catch {}
+        await bot.dreamGoto(x + 1, upY, z, 1);
+      } catch {
+        try {
+          await bot.dreamGoto(x + 3, y, z + 3, 1);
+        } catch {}
+      }
     } catch {}
   }, 1500);
 }
@@ -309,7 +301,7 @@ export async function startNavStack(agent) {
     if (bot.ashfinder) configAsh(bot);
     startPassiveResource(bot, agent);
     startUnstuck(bot, agent);
-    console.log('[NAV] READY — dig/place = pathfinder + ashfinder');
+    console.log('[NAV] READY — softer move + hole unstuck');
   };
 
   if (bot.entity) boot();
