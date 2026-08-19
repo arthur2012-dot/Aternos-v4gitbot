@@ -1,5 +1,5 @@
 /**
- * After fetch-base — wire PvP, passive skills, Baritone-nav, Voyager curriculum.
+ * After fetch-base — wire all DreamBot modules.
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
 import { join, dirname } from 'path';
@@ -22,6 +22,7 @@ copy('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 copy('scripts/passive-skills.js', 'src/agent/passive-skills.js');
 copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
 copy('scripts/voyager-skills.js', 'src/agent/voyager-skills.js');
+copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
 
 const agentPath = join(ROOT, 'src/agent/agent.js');
 if (!existsSync(agentPath)) {
@@ -31,9 +32,23 @@ if (!existsSync(agentPath)) {
 
 let agent = readFileSync(agentPath, 'utf8');
 
-if (!agent.includes('[DreamBot] STACK LOAD')) {
-  const block = `
-            // [DreamBot] STACK LOAD — PvP + passive + Baritone-nav + Voyager
+if (!agent.includes('startAntiFreeze')) {
+  const inject = `
+            try {
+                const { startAntiFreeze } = await import('./anti-freeze.js');
+                startAntiFreeze(this);
+            } catch (e) { console.warn('[DreamBot] anti-freeze', e.message); }
+`;
+  if (agent.includes('[DreamBot] STACK LOAD')) {
+    agent = agent.replace(
+      /startVoyagerCurriculum\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] voyager', e\.message\); \}/,
+      (m) => m + inject
+    );
+  } else if (agent.includes("this.bot.once('spawn'")) {
+    agent = agent.replace(
+      /this\.bot\.once\('spawn', async \(\) => \{/,
+      `this.bot.once('spawn', async () => {
+            // [DreamBot] STACK LOAD
             try {
                 const { startPvpCombat } = await import('./pvp-combat.js');
                 startPvpCombat(this);
@@ -50,21 +65,15 @@ if (!agent.includes('[DreamBot] STACK LOAD')) {
                 const { startVoyagerCurriculum } = await import('./voyager-skills.js');
                 startVoyagerCurriculum(this);
             } catch (e) { console.warn('[DreamBot] voyager', e.message); }
-`;
-  if (agent.includes("this.bot.once('spawn'")) {
-    agent = agent.replace(
-      /this\.bot\.once\('spawn', async \(\) => \{/,
-      `this.bot.once('spawn', async () => {${block}`
-    );
-  } else if (agent.includes('async startSession')) {
-    agent = agent.replace(
-      /async startSession\([^)]*\) \{/,
-      (m) => m + block
+            try {
+                const { startAntiFreeze } = await import('./anti-freeze.js');
+                startAntiFreeze(this);
+            } catch (e) { console.warn('[DreamBot] anti-freeze', e.message); }
+`
     );
   }
   writeFileSync(agentPath, agent);
-  console.log('[post-wire] agent.js wired: PvP + passive + Baritone + Voyager');
+  console.log('[post-wire] anti-freeze wired');
 } else {
-  // force refresh baritone-nav copy is enough; re-inject if old stack without passive goals message
-  console.log('[post-wire] stack already wired');
+  console.log('[post-wire] anti-freeze already present');
 }
