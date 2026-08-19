@@ -13,11 +13,10 @@ const settings = {
     speak: false,
     chat_ingame: true,
     language: "pt",
-    // Heavy 3D viewer OFF (lags/crashes Railway)
-    render_bot_view: false,
+    // UI iframe uses /viewer (proxied) — works on mobile after patch-ui-viewer
+    render_bot_view: true,
     show_bot_views: false,
     allow_insecure_coding: false,
-    // Light text vision ON (scene from blocks/entities, no WebGL)
     allow_vision: true,
     blocked_actions: [
         "!checkBlueprint",
