@@ -1,11 +1,7 @@
 /**
- * DreamBot PvP — defensive, skilled, not crazy.
- *
- * - Only starts when a player damages him
- * - Each NEW hit he takes refreshes the fight timer (fair)
- * - Does NOT refresh just because you're nearby (that was the old bug)
- * - Strafe, sprint, crits, range control
- * - Stops if you run away or timer ends
+ * DreamBot PvP — defensive + combo timing (Jazzghost-style rhythm).
+ * Only fights when DAMAGED. Crit jump + land hit + W-tap + strafe.
+ * Not infinite chase. Not aggressive first-hit.
  */
 export function startPvpCombat(agent) {
   const bot = agent.bot;
@@ -14,20 +10,21 @@ export function startPvpCombat(agent) {
 
   let target = null;
   let fightUntil = 0;
-  let lastDamageAt = 0;
   let lastSwing = 0;
   let lastJump = 0;
   let strafeDir = 1;
+  let lastStrafeFlip = 0;
   let cooldownUntil = 0;
+  let comboPhase = 0; // 0 idle, 1 jumped, 2 hit
 
-  // Balanced: good fight, not infinite
-  const FIGHT_WINDOW = 10000;  // 10s after last damage taken
-  const MAX_CHASE = 10;        // stop if player farther than this
-  const IDEAL_MIN = 2.0;
-  const IDEAL_MAX = 3.3;
-  const REACH = 3.4;
-  const SWING_MS = 580;        // roughly sword cooldown feel
-  const COOLDOWN_AFTER = 3000; // 3s before re-engage same situation
+  const FIGHT_WINDOW = 12000;
+  const MAX_CHASE = 11;
+  const IDEAL_MIN = 2.1;
+  const IDEAL_MAX = 3.2;
+  const REACH = 3.35;
+  const COOLDOWN_AFTER = 2500;
+  // Sword cooldown ~0.625s (10 ticks) — hit on cooldown for clean combos
+  const SWING_MS = 625;
 
   const clearMove = () => {
     try {
@@ -41,6 +38,7 @@ export function startPvpCombat(agent) {
     if (target) console.log('[DreamBot] PVP end:', why);
     target = null;
     fightUntil = 0;
+    comboPhase = 0;
     bot._dreamPvpActive = false;
     cooldownUntil = Date.now() + COOLDOWN_AFTER;
     clearMove();
@@ -72,9 +70,9 @@ export function startPvpCombat(agent) {
   };
 
   const tryEat = async () => {
-    if (bot.health > 12) return;
+    if (bot.health > 11) return;
     const food = bot.inventory.items().find(i =>
-      /cooked_|bread|apple|golden_apple|beef|pork|chicken|carrot|potato|mutton/.test(i.name)
+      /golden_apple|cooked_|bread|apple|beef|pork|chicken|carrot|potato|mutton/.test(i.name)
     );
     if (!food) return;
     try {
@@ -84,7 +82,7 @@ export function startPvpCombat(agent) {
     } catch {}
   };
 
-  // Engage / refresh ONLY when we take damage
+  // ONLY engage when we take damage (not on nearby swing)
   bot.on('entityHurt', (entity) => {
     try {
       if (entity !== bot.entity) return;
@@ -93,7 +91,7 @@ export function startPvpCombat(agent) {
       const players = Object.values(bot.entities).filter(e =>
         e.type === 'player' &&
         e.username !== bot.username &&
-        e.position.distanceTo(bot.entity.position) <= 6
+        e.position.distanceTo(bot.entity.position) <= 7
       );
       if (!players.length) return;
 
@@ -104,9 +102,7 @@ export function startPvpCombat(agent) {
       );
 
       const now = Date.now();
-      lastDamageAt = now;
       target = players[0];
-      // Refresh timer only on actual damage — fair and not infinite
       fightUntil = now + FIGHT_WINDOW;
       bot._dreamPvpActive = true;
       console.log('[DreamBot] PVP defend', target.username || target.id);
@@ -116,8 +112,7 @@ export function startPvpCombat(agent) {
 
   setInterval(async () => {
     try {
-      if (!bot.entity) return;
-      if (!target) return;
+      if (!bot.entity || !target) return;
 
       if (Date.now() > fightUntil) {
         stop('timer');
@@ -142,64 +137,91 @@ export function startPvpCombat(agent) {
         bot.pathfinder?.stop?.();
       } catch {}
 
-      if (bot.health <= 10) await tryEat();
+      if (bot.health <= 9) await tryEat();
 
       try {
-        await bot.lookAt(target.position.offset(0, target.height * 0.9, 0), true);
+        await bot.lookAt(target.position.offset(0, target.height * 0.88, 0), true);
       } catch {}
 
+      // --- Movement: circle + pressure ---
       clearMove();
 
-      // Distance control
       if (dist > IDEAL_MAX) {
         bot.setControlState('forward', true);
         bot.setControlState('sprint', true);
+        // occasional hop while closing
+        if (Date.now() - lastJump > 700 && bot.entity.onGround) {
+          bot.setControlState('jump', true);
+          lastJump = Date.now();
+          setTimeout(() => { try { bot.setControlState('jump', false); } catch {} }, 100);
+        }
       } else if (dist < IDEAL_MIN) {
         bot.setControlState('back', true);
         if (bot.health <= 8) bot.setControlState('sprint', true);
       } else {
-        // Circle strafe in ideal range
+        // Ideal band: strafe circle (combo space)
+        if (Date.now() - lastStrafeFlip > 650) {
+          strafeDir *= -1;
+          lastStrafeFlip = Date.now();
+        }
         bot.setControlState(strafeDir > 0 ? 'left' : 'right', true);
-        bot.setControlState('forward', Math.random() > 0.35);
-        if (Math.random() < 0.03) strafeDir *= -1;
+        bot.setControlState('forward', true);
+        bot.setControlState('sprint', true);
       }
 
+      // --- Combo attack: crit on cooldown ---
       const now = Date.now();
-      if (dist <= REACH && now - lastSwing >= SWING_MS) {
-        const wantCrit =
-          bot.entity.onGround &&
-          now - lastJump > 900 &&
-          Math.random() < 0.45;
+      if (dist > REACH || now - lastSwing < SWING_MS) return;
 
-        if (wantCrit) {
-          bot.setControlState('jump', true);
-          lastJump = now;
+      // Crit: jump then hit slightly after apex / on fall
+      const doCrit =
+        bot.entity.onGround &&
+        now - lastJump > 550 &&
+        Math.random() < 0.72;
+
+      if (doCrit) {
+        comboPhase = 1;
+        bot.setControlState('jump', true);
+        lastJump = now;
+        setTimeout(() => {
+          try {
+            bot.setControlState('jump', false);
+            // hit mid-air / landing for crit
+            bot.attack(target);
+            lastSwing = Date.now();
+            comboPhase = 2;
+            // W-tap: cancel sprint briefly for KB reset feel
+            bot.setControlState('sprint', false);
+            bot.setControlState('forward', false);
+            setTimeout(() => {
+              try {
+                if (!target) return;
+                bot.setControlState('sprint', true);
+                bot.setControlState('forward', true);
+                comboPhase = 0;
+              } catch {}
+            }, 90);
+          } catch {}
+        }, 145);
+      } else {
+        // Normal timed hit
+        try {
+          bot.setControlState('sprint', true);
+          bot.attack(target);
+          lastSwing = now;
+          // micro W-tap
+          bot.setControlState('forward', false);
           setTimeout(() => {
             try {
-              bot.setControlState('jump', false);
-              bot.attack(target);
-              lastSwing = Date.now();
-              // light W-tap
-              bot.setControlState('sprint', false);
-              setTimeout(() => {
-                try {
-                  if (target) bot.setControlState('sprint', true);
-                } catch {}
-              }, 70);
+              if (target) bot.setControlState('forward', true);
             } catch {}
-          }, 160);
-        } else {
-          try {
-            bot.setControlState('sprint', true);
-            bot.attack(target);
-            lastSwing = now;
-          } catch {}
-        }
+          }, 55);
+        } catch {}
       }
     } catch (e) {
       console.warn('[DreamBot] PVP tick', e.message);
     }
-  }, 120);
+  }, 100);
 
-  console.log('[DreamBot] PVP v3 — defensive, skilled, 10s window per hit taken');
+  console.log('[DreamBot] PVP v4 — combo crit + W-tap + strafe (defensive only)');
 }
