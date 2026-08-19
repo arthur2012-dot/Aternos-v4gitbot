@@ -1,7 +1,6 @@
 /**
- * Navigation: mineflayer-pathfinder + optional ashfinder.
- * Softer movements to reduce Aternos "moved incorrectly" warnings.
- * Hole unstuck asks pathfinder to climb out — no random AFK jumps.
+ * Navigation: pathfinder + ashfinder with LOCK (one goal at a time).
+ * Fixes: "Already navigating", "goal was changed", stuck in 1x1 holes.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -27,7 +26,9 @@ async function withTimeout(p, ms) {
   try {
     return await Promise.race([
       p,
-      new Promise((_, rej) => { t = setTimeout(() => rej(new Error('timeout')), ms); }),
+      new Promise((_, rej) => {
+        t = setTimeout(() => rej(new Error('timeout')), ms);
+      }),
     ]);
   } finally {
     clearTimeout(t);
@@ -38,15 +39,14 @@ function setupPrismarine(bot) {
   try {
     const mcData = require('minecraft-data')(bot.version);
     const m = new Movements(bot);
-
     m.canDig = true;
-    m.digCost = 1.5; // prefer path around a bit more
-    m.placeCost = 1.2;
+    m.digCost = 1.2;
+    m.placeCost = 1.0;
     m.allowSprinting = true;
     m.allowParkour = true;
     m.allow1by1towers = true;
     m.canOpenDoors = true;
-    m.allowFreeMotion = false; // less rubber-band / anti-cheat
+    m.allowFreeMotion = false;
     m.maxDropDown = 3;
     m.dontMineUnderFallingBlock = true;
 
@@ -60,15 +60,13 @@ function setupPrismarine(bot) {
       const id = mcData.itemsByName[name]?.id;
       if (id != null) m.scafoldingBlocks.push(id);
     }
-
     for (const name of ['crafting_table', 'chest', 'furnace', 'beacon', 'spawner']) {
       const id = mcData.blocksByName[name]?.id;
       if (id != null) m.blocksCantBreak.add(id);
     }
-
     bot.pathfinder.setMovements(m);
-    bot.pathfinder.thinkTimeout = 8000;
-    console.log('[NAV] pathfinder softer (less anti-cheat)');
+    bot.pathfinder.thinkTimeout = 10000;
+    console.log('[NAV] pathfinder dig+scaffold+tower');
   } catch (e) {
     console.warn('[NAV] pathfinder setup', e.message);
   }
@@ -107,66 +105,92 @@ function configAsh(bot) {
     c.proParkour = false;
     c.maxFallDist = 3;
     c.thinkTimeout = 45000;
-    c.stuckTimeout = 7000;
+    c.stuckTimeout = 8000;
     c.disposableBlocks = [
       'dirt', 'cobblestone', 'stone', 'andesite', 'diorite', 'granite',
       'netherrack', 'oak_planks', 'spruce_planks', 'birch_planks',
       'cobbled_deepslate', 'tuff', 'sand',
     ];
-    c.blocksToAvoid = [
-      'lava', 'fire', 'magma_block', 'cactus',
-      'crafting_table', 'chest', 'furnace',
-    ];
   } catch {}
 }
 
 function installDreamGoto(bot) {
+  bot._navBusy = false;
+  bot._navSince = 0;
+
   bot.dreamStopNav = () => {
-    try { bot.ashfinder?.stop?.(); } catch {}
+    try {
+      bot.ashfinder?.stop?.();
+    } catch {}
     try {
       bot.pathfinder?.setGoal?.(null);
       bot.pathfinder?.stop?.();
     } catch {}
+    bot._navBusy = false;
   };
 
   bot.dreamGoto = async (x, y, z, range = 1) => {
     if (!bot.entity) return false;
-    if (inWater(bot)) {
-      for (let i = 0; i < 25; i++) {
-        if (!inWater(bot)) break;
-        bot.setControlState('jump', true);
-        bot.setControlState('forward', true);
-        await new Promise(r => setTimeout(r, 120));
+
+    // LOCK: one navigation at a time — no "Already navigating" spam
+    if (bot._navBusy) {
+      const age = Date.now() - (bot._navSince || 0);
+      if (age < 25000) {
+        return false; // still working — do not interrupt
       }
-      bot.clearControlStates();
+      bot.dreamStopNav();
     }
 
-    const target = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
-
-    if (bot.ashfinder) {
-      try {
-        configAsh(bot);
-        const bar = await import('@miner-org/mineflayer-baritone');
-        const g = bar.goals || bar.default?.goals;
-        if (g?.GoalNear) {
-          await withTimeout(bot.ashfinder.goto(new g.GoalNear(target, range)), 45000);
-          return true;
-        }
-      } catch (e) {
-        console.warn('[NAV] ash goto', (e.message || '').slice(0, 40));
-      }
-    }
+    bot._navBusy = true;
+    bot._navSince = Date.now();
 
     try {
-      setupPrismarine(bot);
-      await withTimeout(
-        bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, range)),
-        35000
-      );
-      return true;
-    } catch (e) {
-      console.warn('[NAV] pf goto', (e.message || '').slice(0, 40));
+      if (inWater(bot)) {
+        for (let i = 0; i < 30; i++) {
+          if (!inWater(bot)) break;
+          bot.setControlState('jump', true);
+          bot.setControlState('forward', true);
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        bot.clearControlStates();
+      }
+
+      const target = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
+
+      // Prefer pathfinder first (more stable with Mindcraft); ash only if free
+      try {
+        setupPrismarine(bot);
+        await withTimeout(
+          bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, range)),
+          40000
+        );
+        return true;
+      } catch (e) {
+        const msg = (e.message || '').slice(0, 50);
+        if (!/goal was changed|PathStopped|cancel/i.test(msg)) {
+          console.warn('[NAV] pf', msg);
+        }
+      }
+
+      if (bot.ashfinder) {
+        try {
+          configAsh(bot);
+          const bar = await import('@miner-org/mineflayer-baritone');
+          const g = bar.goals || bar.default?.goals;
+          if (g?.GoalNear) {
+            await withTimeout(bot.ashfinder.goto(new g.GoalNear(target, range)), 40000);
+            return true;
+          }
+        } catch (e) {
+          const msg = (e.message || '').slice(0, 50);
+          if (!/Already navigating|stop/i.test(msg)) {
+            console.warn('[NAV] ash', msg);
+          }
+        }
+      }
       return false;
+    } finally {
+      bot._navBusy = false;
     }
   };
 
@@ -174,115 +198,113 @@ function installDreamGoto(bot) {
     if (!block?.position) return false;
     return bot.dreamGoto(block.position.x, block.position.y, block.position.z, range);
   };
+
+  bot.dreamIsNavigating = () =>
+    !!bot._navBusy ||
+    !!bot.pathfinder?.isMoving?.() ||
+    !!bot.targetDigBlock;
 }
 
-async function resourceDig(bot, block) {
-  if (!block) return false;
-  try {
-    const inv = bot.inventory.items();
-    const n = block.name || '';
-    let tool = null;
-    if (/_log$|planks|leaves/.test(n)) tool = inv.find(i => /_axe$/.test(i.name));
-    else if (/dirt|sand|gravel|grass/.test(n)) tool = inv.find(i => /_shovel$/.test(i.name));
-    else tool = inv.find(i => /_pickaxe$/.test(i.name));
-    if (tool) await bot.equip(tool, 'hand');
-    await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
-    await withTimeout(bot.dig(block), 8000);
-    return true;
-  } catch {
-    try { bot.stopDigging(); } catch {}
-    return false;
-  }
-}
-
-function startPassiveResource(bot, agent) {
-  if (bot._dreamPassiveRes) return;
-  bot._dreamPassiveRes = true;
-  let run = false;
-
-  const find = (names, dist) => {
+/** Dig out of 1x1 shaft / tight corridor */
+async function digEscapeTight(bot) {
+  if (!bot.entity) return false;
+  const p = bot.entity.position.floored();
+  const inv = bot.inventory.items();
+  const pick = inv.find((i) => /pickaxe/.test(i.name));
+  const axe = inv.find((i) => /_axe$/.test(i.name));
+  if (pick) {
     try {
-      const mcData = require('minecraft-data')(bot.version);
-      for (const name of names) {
-        const id = mcData.blocksByName[name]?.id;
-        if (id == null) continue;
-        const blocks = bot.findBlocks({ matching: id, maxDistance: dist, count: 4 });
-        if (blocks[0]) return bot.blockAt(blocks[0]);
-      }
+      await bot.equip(pick, 'hand');
     } catch {}
-    return null;
-  };
+  }
 
-  setInterval(async () => {
-    if (run || !bot.entity || bot._dreamPvpActive) return;
-    if (agent?.actions?.executing) return;
-    if (bot.pathfinder?.isMoving?.()) return;
-    if (bot.ashfinder?.path?.length) return;
-    if (agent?._passiveRunning) return; // let passive brain own the tick
-    run = true;
+  const offsets = [
+    [0, 1, 0],
+    [0, 2, 0],
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+    [1, 1, 0],
+    [-1, 1, 0],
+    [0, 1, 1],
+    [0, 1, -1],
+  ];
+
+  let dug = 0;
+  for (const [ox, oy, oz] of offsets) {
     try {
-      const inv = bot.inventory.items();
-      const logs = inv.filter(i => /_log$/.test(i.name)).reduce((s, i) => s + i.count, 0);
-      const pick = inv.some(i => /pickaxe/.test(i.name));
-      const cobble = inv.filter(i => /cobblestone|^stone$/.test(i.name)).reduce((s, i) => s + i.count, 0);
-
-      let b = null;
-      if (logs < 6) {
-        b = find(['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'cherry_log'], 36);
-      } else if (pick && cobble < 12) {
-        b = find(['stone', 'cobblestone', 'deepslate'], 24);
+      const b = bot.blockAt(p.offset(ox, oy, oz));
+      if (!b || b.name === 'air' || b.name === 'cave_air' || b.name === 'water') continue;
+      if (b.boundingBox !== 'block') continue;
+      if (/bedrock|barrier|command/.test(b.name)) continue;
+      if (/_log$|planks|leaves/.test(b.name) && axe) {
+        try {
+          await bot.equip(axe, 'hand');
+        } catch {}
+      } else if (pick) {
+        try {
+          await bot.equip(pick, 'hand');
+        } catch {}
       }
-      if (!b) return;
-
-      console.log('[NAV] resource', b.name);
-      await bot.dreamGoto(b.position.x, b.position.y, b.position.z, 2);
-      await resourceDig(bot, b);
-    } catch (e) {
-      console.warn('[NAV] resource', e.message);
-    } finally {
-      run = false;
+      await bot.lookAt(b.position.offset(0.5, 0.5, 0.5), true);
+      await withTimeout(bot.dig(b), 8000);
+      dug++;
+      if (dug >= 4) break;
+    } catch {
+      try {
+        bot.stopDigging();
+      } catch {}
     }
-  }, 14000);
+  }
 
-  console.log('[NAV] passive resource (deferred to passive brain when busy)');
+  if (dug > 0) {
+    console.log('[NAV] dug escape blocks:', dug);
+    bot.setControlState('jump', true);
+    bot.setControlState('forward', true);
+    await new Promise((r) => setTimeout(r, 500));
+    bot.clearControlStates();
+    return true;
+  }
+  return false;
 }
 
 function startUnstuck(bot, agent) {
   if (bot._dreamUnstuck) return;
   bot._dreamUnstuck = true;
   let still = 0;
-  let lx = null, lz = null, ly = null;
+  let lx = null,
+    ly = null,
+    lz = null;
 
   setInterval(async () => {
     try {
       if (!bot.entity || bot._dreamPvpActive) return;
-      if (bot.pathfinder?.isMoving?.()) {
-        still = 0;
-        return;
-      }
       if (bot.targetDigBlock) {
         still = 0;
         return;
       }
+      if (bot._navBusy && Date.now() - bot._navSince < 15000) {
+        still = 0;
+        return;
+      }
+
       const x = bot.entity.position.x;
       const y = bot.entity.position.y;
       const z = bot.entity.position.z;
-      if (lx != null && Math.abs(x - lx) + Math.abs(z - lz) + Math.abs(y - ly) < 0.12) still++;
+      if (lx != null && Math.abs(x - lx) + Math.abs(z - lz) + Math.abs(y - ly) < 0.15) still++;
       else still = 0;
-      lx = x; ly = y; lz = z;
+      lx = x;
+      ly = y;
+      lz = z;
 
-      if (still < 8) return; // ~12s truly stuck
-      still = 0;
-      console.log('[NAV] unstuck → GoalY / nearby');
-
-      // Prefer climb up if in hole (higher Y nearby)
-      const upY = Math.floor(y) + 2;
-      try {
-        await bot.dreamGoto(x + 1, upY, z, 1);
-      } catch {
-        try {
-          await bot.dreamGoto(x + 3, y, z + 3, 1);
-        } catch {}
+      // ~6s stuck → dig out (1x1 hole / corridor)
+      if (still >= 4) {
+        still = 0;
+        console.log('[NAV] STUCK → dig escape');
+        bot.dreamStopNav();
+        await digEscapeTight(bot);
+        return;
       }
     } catch {}
   }, 1500);
@@ -299,9 +321,8 @@ export async function startNavStack(agent) {
   const boot = () => {
     setupPrismarine(bot);
     if (bot.ashfinder) configAsh(bot);
-    startPassiveResource(bot, agent);
     startUnstuck(bot, agent);
-    console.log('[NAV] READY — softer move + hole unstuck');
+    console.log('[NAV] READY — locked goto + dig-escape');
   };
 
   if (bot.entity) boot();
