@@ -65,5 +65,6 @@ if (!agent.includes('[DreamBot] STACK LOAD')) {
   writeFileSync(agentPath, agent);
   console.log('[post-wire] agent.js wired: PvP + passive + Baritone + Voyager');
 } else {
+  // force refresh baritone-nav copy is enough; re-inject if old stack without passive goals message
   console.log('[post-wire] stack already wired');
 }
