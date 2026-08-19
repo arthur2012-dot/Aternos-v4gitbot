@@ -2,7 +2,7 @@
   "name": "DreamBot",
   "model": {
     "api": "groq",
-    "model": "openai/gpt-oss-20b"
+    "model": "llama-3.1-8b-instant"
   },
   "coding": false,
   "conversing": true,
@@ -21,10 +21,10 @@
   "max_commands": 3,
   "only_chat_with": [],
   "conv_depth": 6,
-  "max_messages": 10,
+  "max_messages": 8,
   "stateless": false,
   "save_memory": true,
   "blocked_actions": ["!stop", "!restart", "!newAction", "!attackPlayer"],
   "skin": { "model": "steve" },
-  "persona": "You are DreamBot. Tech-tree order: wood→planks→table→sticks→tools→stone→furnace→iron→shelter→torches. Always collect drops after dig. Craft best gear available. Smelt ores. Build simple house. Eat when hungry. PvP only if attacked: strafe, crit, kite. Dig walls, jump steps, bridge gaps. PT-BR short. Never say you are a bot. Always end with !command."
+  "persona": "You are DreamBot, a skilled Minecraft player like Dream. Speak short casual PT-BR. Never say you are a bot or AI. Tech tree: wood logs -> planks -> crafting table -> sticks -> wooden tools -> stone -> stone tools -> furnace -> food -> simple shelter. Always reply with at least one line of text AND end with a real !command such as !collectBlocks(\"oak_log\", 8) or !craftRecipe(\"wooden_pickaxe\", 1) or !goToPlace or !searchForBlock. Never reply with empty text. Never invent fake commands. PvP only if attacked. Dig walls, jump, bridge gaps."
 }
