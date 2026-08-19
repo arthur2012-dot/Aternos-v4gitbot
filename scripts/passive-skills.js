@@ -1,7 +1,6 @@
 /**
  * PASSIVE BRAIN — pure code, no LLM.
- * Emergency food when dying — does NOT wait for Groq.
- * Dig-in-face + tight hole escape + respect nav lock.
+ * Dry feet (no water under) + dig staircase out of holes + interrupt Chatting when stuck.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -115,10 +114,10 @@ function findBlock(bot, names, dist = 32) {
       const id = mcData.blocksByName[name]?.id;
       if (id == null) continue;
       const found = bot.findBlocks({ matching: id, maxDistance: dist, count: 12 });
-      for (const p of found) {
-        const b = bot.blockAt(p);
+      for (const pos of found) {
+        const b = bot.blockAt(pos);
         if (!b) continue;
-        const under = bot.blockAt(p.offset(0, -1, 0));
+        const under = bot.blockAt(pos.offset(0, -1, 0));
         if (under && /lava/.test(under.name || '')) continue;
         return b;
       }
@@ -322,44 +321,123 @@ async function replaceBrokenTools(bot) {
   return false;
 }
 
+async function dryFeet(bot) {
+  try {
+    const under = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+    const feet = bot.blockAt(bot.entity.position);
+    const wet =
+      (under && /water/.test(under.name || '')) ||
+      (feet && /water/.test(feet.name || '')) ||
+      bot.entity.isInWater;
+    if (!wet) return false;
+    const scaffold = items(bot).find(i => BUILD_RE.test(i.name));
+    if (!scaffold) return false;
+    await bot.equip(scaffold, 'hand');
+    bot.setControlState('jump', true);
+    await sleep(180);
+    const bases = [
+      bot.blockAt(bot.entity.position.offset(0, -2, 0)),
+      bot.blockAt(bot.entity.position.offset(1, -1, 0)),
+      bot.blockAt(bot.entity.position.offset(-1, -1, 0)),
+      bot.blockAt(bot.entity.position.offset(0, -1, 1)),
+      bot.blockAt(bot.entity.position.offset(0, -1, -1)),
+      bot.blockAt(bot.entity.position.offset(1, 0, 0)),
+      bot.blockAt(bot.entity.position.offset(-1, 0, 0)),
+      bot.blockAt(bot.entity.position.offset(0, 0, 1)),
+      bot.blockAt(bot.entity.position.offset(0, 0, -1)),
+    ];
+    for (const base of bases) {
+      if (!base || base.boundingBox !== 'block') continue;
+      if (/water|lava|air|cave_air/.test(base.name || '')) continue;
+      try {
+        await race(bot.placeBlock(base, new Vec3(0, 1, 0)), 2500);
+        console.log('[PASSIVE] dry feet — solid under');
+        bot.clearControlStates();
+        return true;
+      } catch {
+        try {
+          await race(bot.placeBlock(base, new Vec3(1, 0, 0)), 1500);
+          console.log('[PASSIVE] dry feet — side');
+          bot.clearControlStates();
+          return true;
+        } catch {}
+      }
+    }
+    bot.clearControlStates();
+    return false;
+  } catch {
+    try { bot.clearControlStates(); } catch {}
+    return false;
+  }
+}
+
 async function escapeHole(bot) {
   try {
-    const p = bot.entity.position.floored();
-    const head = bot.blockAt(p.offset(0, 1, 0));
-    const above = bot.blockAt(p.offset(0, 2, 0));
+    const pos = bot.entity.position.floored();
+    const head = bot.blockAt(pos.offset(0, 1, 0));
     let walls = 0;
     for (const o of [[1,0],[-1,0],[0,1],[0,-1]]) {
-      const b = bot.blockAt(p.offset(o[0], 0, o[1]));
+      const b = bot.blockAt(pos.offset(o[0], 0, o[1]));
       if (b && b.boundingBox === 'block') walls++;
     }
     const headSolid = head && head.boundingBox === 'block';
-    const tight = walls >= 2 || headSolid;
-    if (!tight && !headSolid) return false;
-    console.log('[PASSIVE] escape tight walls=' + walls);
-    const cells = [[0,1,0],[0,2,0],[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[1,1,0],[-1,1,0],[0,1,1],[0,1,-1]];
-    for (const [ox,oy,oz] of cells) {
-      const b = bot.blockAt(p.offset(ox, oy, oz));
-      if (b && b.boundingBox === 'block' && !/bedrock|barrier/.test(b.name||'')) {
-        await dig(bot, b);
+    const under = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+    const feetBlk = bot.blockAt(bot.entity.position);
+    const wet =
+      bot.entity.isInWater ||
+      (under && /water/.test(under.name || '')) ||
+      (feetBlk && /water/.test(feetBlk.name || ''));
+    const tight = walls >= 2 || headSolid || wet;
+    if (!tight) return false;
+
+    console.log('[PASSIVE] escape tight walls=' + walls + (wet ? ' WET' : ''));
+
+    if (wet) await dryFeet(bot);
+
+    const yaw = bot.entity.yaw;
+    const fdx = Math.round(-Math.sin(yaw));
+    const fdz = Math.round(-Math.cos(yaw));
+    const cells = [
+      [0, 1, 0], [0, 2, 0], [0, 3, 0],
+      [fdx, 1, fdz], [fdx, 2, fdz], [fdx, 0, fdz],
+      [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+      [1, 1, 0], [-1, 1, 0], [0, 1, 1], [0, 1, -1],
+    ];
+    let dug = 0;
+    for (const [ox, oy, oz] of cells) {
+      const b = bot.blockAt(pos.offset(ox, oy, oz));
+      if (b && b.boundingBox === 'block' && !/bedrock|barrier/.test(b.name || '')) {
+        if (await dig(bot, b)) {
+          dug++;
+          if (dug >= 4) break;
+        }
       }
     }
+
     const scaffold = items(bot).find(i => BUILD_RE.test(i.name));
     if (scaffold) {
       try {
         await bot.equip(scaffold, 'hand');
-        bot.setControlState('sneak', true);
-        bot.setControlState('jump', true);
-        await sleep(250);
-        const under = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-        if (under) {
-          try { await race(bot.placeBlock(under, new Vec3(0, 1, 0)), 2000); } catch {}
+        for (let i = 0; i < 3; i++) {
+          bot.setControlState('jump', true);
+          await sleep(200);
+          const base = bot.blockAt(bot.entity.position.offset(0, -2, 0))
+            || bot.blockAt(bot.entity.position.offset(0, -1, 0));
+          if (base && base.boundingBox === 'block' && !/water/.test(base.name || '')) {
+            try { await race(bot.placeBlock(base, new Vec3(0, 1, 0)), 2000); } catch {}
+          } else {
+            await dryFeet(bot);
+          }
+          await sleep(150);
         }
         bot.clearControlStates();
       } catch { bot.clearControlStates(); }
     }
+
     bot.setControlState('forward', true);
     bot.setControlState('jump', true);
-    await sleep(500);
+    bot.setControlState('sprint', true);
+    await sleep(600);
     bot.clearControlStates();
     return true;
   } catch { return false; }
@@ -405,7 +483,26 @@ export async function runPassiveSkillTick(agent) {
   const bot = agent.bot;
   if (!bot?.entity || bot._dreamPvpActive) return;
 
-  // Respect nav lock — dig resource in face instead of new goals
+  // Interrupt Chatting / freeze when wet or in tight hole
+  try {
+    const under = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+    const wet = bot.entity.isInWater || (under && /water/.test(under.name || ''));
+    let walls = 0;
+    const pf = bot.entity.position.floored();
+    for (const o of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const b = bot.blockAt(pf.offset(o[0], 0, o[1]));
+      if (b && b.boundingBox === 'block') walls++;
+    }
+    if (wet || walls >= 2) {
+      try { agent.actions?.stop?.(); } catch {}
+      try { agent.self_prompter?.stopLoop?.(); } catch {}
+      try { bot.clearControlStates(); } catch {}
+      if (wet) await dryFeet(bot);
+      await escapeHole(bot);
+      return;
+    }
+  } catch {}
+
   if (bot._navBusy || bot.dreamIsNavigating?.()) {
     try {
       const look = bot.blockAtCursor?.(4);
@@ -415,7 +512,6 @@ export async function runPassiveSkillTick(agent) {
         return;
       }
     } catch {}
-    // still try escape if tight
     if (await escapeHole(bot)) return;
     return;
   }
@@ -551,6 +647,6 @@ export function startPassiveSkills(agent) {
   };
 
   setTimeout(tick, 1500);
-  setInterval(tick, 7000);
-  console.log('[PASSIVE] BRAIN ON — dig-in-face + tight escape + nav lock');
+  setInterval(tick, 3500);
+  console.log('[PASSIVE] BRAIN ON — dry feet + dig stair out of holes');
 }
