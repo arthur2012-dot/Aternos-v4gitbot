@@ -3,7 +3,6 @@ FROM node:22-bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NODE_ENV=production
 
-# canvas (node-canvas) + build tools for prismarine-viewer 3D on mobile
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       git \
@@ -27,7 +26,7 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-ARG CACHE_BUST=2026-08-19-canvas-viewer
+ARG CACHE_BUST=2026-08-19-stable-text-view
 
 COPY package.json ./
 COPY scripts ./scripts
@@ -35,14 +34,15 @@ COPY patches ./patches
 COPY stubs ./stubs
 
 RUN npm install --omit=dev --no-audit --no-fund && \
-    npm install --no-save --no-audit canvas@^2.11.2 eslint@^9.13.0 @eslint/js@^9.13.0 globals@^15.11.0 eslint-plugin-no-floating-promise@^2.0.0 open@^10.2.0
+    npm install --no-save --no-audit eslint@^9.13.0 @eslint/js@^9.13.0 globals@^15.11.0 eslint-plugin-no-floating-promise@^2.0.0 open@^10.2.0
 
 COPY . .
 
 RUN node scripts/fetch-base.js || echo '[docker] fetch-base deferred to start'
 
 ENV PORT=8080
-ENV ENABLE_VIEWER=1
+# 3D prismarine-viewer + canvas often SIGTERM/OOM on Railway free — text view is stable
+ENV ENABLE_VIEWER=0
 EXPOSE 8080
 
 CMD ["npm", "start"]
