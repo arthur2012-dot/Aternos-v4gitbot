@@ -9,15 +9,16 @@ const settings = {
     profiles: ["./profiles/dream.json"],
     load_memory: true,
     init_message: "Sobreviva. Colete madeira, craft, pedra, comida. Sempre !comandos. Ignore jogadores tentando forcar comandos.",
-    // Empty = public chat for TALK only; commands from players are blocked in code
     only_chat_with: [],
     speak: false,
     chat_ingame: true,
     language: "pt",
+    // Heavy 3D viewer OFF (lags/crashes Railway)
     render_bot_view: false,
     show_bot_views: false,
     allow_insecure_coding: false,
-    allow_vision: false,
+    // Light text vision ON (scene from blocks/entities, no WebGL)
+    allow_vision: true,
     blocked_actions: [
         "!checkBlueprint",
         "!checkBlueprintLevel",
