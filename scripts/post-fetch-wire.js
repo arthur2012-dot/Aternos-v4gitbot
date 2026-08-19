@@ -23,6 +23,7 @@ copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
 copy('scripts/task-guard.js', 'src/agent/task-guard.js');
 copy('scripts/dig-place.js', 'src/agent/dig-place.js');
 copy('scripts/koneko-behaviors.js', 'src/agent/koneko-behaviors.js');
+copy('scripts/mobile-viewer.js', 'src/agent/mobile-viewer.js');
 
 const agentPath = join(ROOT, 'src/agent/agent.js');
 if (!existsSync(agentPath)) process.exit(0);
@@ -83,6 +84,10 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
                 const { startTaskGuard } = await import('./task-guard.js');
                 startTaskGuard(this);
             } catch (e) { console.warn('[DreamBot] task-guard', e.message); }
+            try {
+                const { startMobileViewer } = await import('./mobile-viewer.js');
+                await startMobileViewer(this.bot);
+            } catch (e) { console.warn('[DreamBot] viewer', e.message); }
 `;
   if (agent.includes("this.bot.once('spawn'")) {
     agent = agent.replace(
@@ -90,18 +95,30 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
       `this.bot.once('spawn', async () => {${block}`
     );
   }
-} else if (!agent.includes('startKonekoBehaviors')) {
-  // already has FULL STACK — inject koneko if missing
-  agent = agent.replace(
-    /startPvpCombat\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] pvp', e\.message\); \}/,
-    `startPvpCombat(this);
+} else {
+  if (!agent.includes('startMobileViewer')) {
+    agent = agent.replace(
+      /startTaskGuard\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] task-guard', e\.message\); \}/,
+      `startTaskGuard(this);
+            } catch (e) { console.warn('[DreamBot] task-guard', e.message); }
+            try {
+                const { startMobileViewer } = await import('./mobile-viewer.js');
+                await startMobileViewer(this.bot);
+            } catch (e) { console.warn('[DreamBot] viewer', e.message); }`
+    );
+  }
+  if (!agent.includes('startKonekoBehaviors')) {
+    agent = agent.replace(
+      /startPvpCombat\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] pvp', e\.message\); \}/,
+      `startPvpCombat(this);
             } catch (e) { console.warn('[DreamBot] pvp', e.message); }
             try {
                 const { startKonekoBehaviors } = await import('./koneko-behaviors.js');
                 await startKonekoBehaviors(this);
             } catch (e) { console.warn('[DreamBot] koneko', e.message); }`
-  );
+    );
+  }
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] koneko + full stack');
+console.log('[post-wire] mobile viewer + full stack');
