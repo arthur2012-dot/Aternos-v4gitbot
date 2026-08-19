@@ -1,7 +1,7 @@
 {
     "name": "dreambot-mindcraft",
     "type": "module",
-    "description": "DreamBot - Mindcraft + Baritone-inspired path + Voyager curriculum",
+    "description": "DreamBot - Mindcraft + multi pathfinder stack",
     "engines": {
         "node": ">=22"
     },
@@ -13,6 +13,7 @@
         "@huggingface/inference": "^2.8.1",
         "@miner-org/mineflayer-baritone": "^1.1.8",
         "@mistralai/mistralai": "^1.1.0",
+        "@nxg-org/mineflayer-pathfinder": "^0.0.26",
         "cheerio": "^1.0.0",
         "eslint": "^9.13.0",
         "eslint-plugin-no-floating-promise": "^2.0.0",
