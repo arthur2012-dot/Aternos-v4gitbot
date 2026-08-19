@@ -21,13 +21,13 @@ copy('scripts/nav-stack.js', 'src/agent/nav-stack.js');
 copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
 copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
 copy('scripts/task-guard.js', 'src/agent/task-guard.js');
+copy('scripts/dig-place.js', 'src/agent/dig-place.js');
 
 const agentPath = join(ROOT, 'src/agent/agent.js');
 if (!existsSync(agentPath)) process.exit(0);
 
 let agent = readFileSync(agentPath, 'utf8');
 
-// Suppress auto-prompt stop spam
 if (!agent.includes('[DreamBot] suppressed') && agent.includes('async openChat')) {
   agent = agent.replace(
     /async openChat\(message\) \{/,
@@ -45,15 +45,14 @@ if (!agent.includes('[DreamBot] suppressed') && agent.includes('async openChat')
   );
 }
 
-// Remove dangerous periodic anti-AFK nudge if we injected one before
 agent = agent.replace(
   /setInterval\(\(\) => \{[\s\S]*?spd < 0\.02[\s\S]*?\}, 10000\);/g,
-  '/* removed random anti-AFK nudge — was killing bot */'
+  '/* no random anti-AFK */'
 );
 
 if (!agent.includes('[DreamBot] FULL STACK')) {
   const block = `
-            // [DreamBot] FULL STACK — passive first, safe anti-freeze
+            // [DreamBot] FULL STACK
             try {
                 const { startPassiveSkills } = await import('./passive-skills.js');
                 startPassiveSkills(this);
@@ -89,4 +88,4 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] passive-first + safe anti-freeze');
+console.log('[post-wire] dig-place + stack');
