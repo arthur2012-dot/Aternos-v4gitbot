@@ -1,10 +1,10 @@
 /**
- * PASSIVE BRAIN — pure code, no LLM.
- * Sprint + autojump + interrupt Thinking when stuck.
+ * PASSIVE BRAIN — pure code + autobot skills (veins/drops/trees).
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
 import { dryFeet, escapeHole } from './escape-hole.js';
+import { runAutobotSkills } from './autobot-skills.js';
 
 const require = createRequire(import.meta.url);
 const { goals } = pathfinder;
@@ -164,44 +164,6 @@ async function emergencyFood(bot) {
   if (!critical) return false;
   console.log('[PASSIVE] EMERGENCY food hp', bot.health, 'hunger', bot.food);
   if (await eatIfNeeded(bot)) return true;
-  const berries = findBlock(bot, ['sweet_berry_bush', 'glow_berries'], 16);
-  if (berries) {
-    await goto(bot, berries.position.x, berries.position.y, berries.position.z, 2);
-    try {
-      await bot.activateBlock(berries);
-      await sleep(400);
-      if (await eatIfNeeded(bot)) return true;
-    } catch {}
-  }
-  const mob = bot.nearestEntity(e => {
-    if (!e || e === bot.entity) return false;
-    const n = String(e.name || e.displayName || '');
-    if (!FOOD_MOB.test(n)) return false;
-    return e.position.distanceTo(bot.entity.position) < 24;
-  });
-  if (mob) {
-    console.log('[PASSIVE] hunt', mob.name || mob.displayName);
-    try {
-      const sword = items(bot).find(i => /sword|axe/.test(i.name));
-      if (sword) await bot.equip(sword, 'hand');
-    } catch {}
-    await goto(bot, mob.position.x, mob.position.y, mob.position.z, 2);
-    for (let i = 0; i < 12; i++) {
-      const live = bot.entities[mob.id];
-      if (!live || !live.isValid) break;
-      try {
-        await bot.lookAt(live.position.offset(0, live.height * 0.5, 0), true);
-        bot.attack(live);
-      } catch {}
-      await sleep(400);
-    }
-    bot.setControlState('forward', true);
-    bot.setControlState('sprint', true);
-    await sleep(600);
-    bot.clearControlStates();
-    if (await eatIfNeeded(bot)) return true;
-    return true;
-  }
   return true;
 }
 
@@ -332,12 +294,10 @@ function enableAutoJump(bot) {
     try {
       if (!bot.entity || bot._dreamPvpActive) return;
       if (bot.targetDigBlock) return;
-
       const moving = !!(bot.controlState.forward || bot.pathfinder?.isMoving?.());
       if (moving && bot.entity.onGround && !bot.entity.isInWater) {
         bot.setControlState('sprint', true);
       }
-
       const yaw = bot.entity.yaw;
       const dx = -Math.sin(yaw);
       const dz = -Math.cos(yaw);
@@ -346,7 +306,6 @@ function enableAutoJump(bot) {
       const blocked = front && front.boundingBox === 'block';
       const canStep = blocked && (!frontUp || frontUp.boundingBox !== 'block');
       const wallAhead = blocked && frontUp && frontUp.boundingBox === 'block';
-
       const now = Date.now();
       if (canStep && bot.entity.onGround && moving && now - lastJump > 250) {
         bot.setControlState('jump', true);
@@ -440,6 +399,7 @@ export async function runPassiveSkillTick(agent) {
   }
 
   if (await escapeHole(bot)) return;
+  try { if (await runAutobotSkills(bot)) return; } catch (e) { console.warn('[AUTO]', (e.message || '').slice(0, 40)); }
   if (await emergencyFood(bot)) return;
   if (await bridgeGap(bot)) return;
 
@@ -573,5 +533,5 @@ export function startPassiveSkills(agent) {
 
   setTimeout(tick, 1500);
   setInterval(tick, 2500);
-  console.log('[PASSIVE] BRAIN ON — sprint+jump + interrupt Thinking');
+  console.log('[PASSIVE] BRAIN ON — autobot veins + sprint + interrupt');
 }
