@@ -1,6 +1,6 @@
 /**
  * PASSIVE BRAIN — pure code, no LLM.
- * Dry feet + dig staircase via escape-hole module.
+ * Sprint + autojump + interrupt Thinking when stuck.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -139,6 +139,7 @@ async function collect(bot, names, need, dist = 36) {
     if (await dig(bot, b)) {
       got++;
       bot.setControlState('forward', true);
+      bot.setControlState('sprint', true);
       await sleep(250);
       bot.clearControlStates();
     } else break;
@@ -195,6 +196,7 @@ async function emergencyFood(bot) {
       await sleep(400);
     }
     bot.setControlState('forward', true);
+    bot.setControlState('sprint', true);
     await sleep(600);
     bot.clearControlStates();
     if (await eatIfNeeded(bot)) return true;
@@ -325,19 +327,35 @@ async function replaceBrokenTools(bot) {
 function enableAutoJump(bot) {
   if (bot._dreamAutoJump) return;
   bot._dreamAutoJump = true;
+  let lastJump = 0;
   bot.on('physicsTick', () => {
     try {
       if (!bot.entity || bot._dreamPvpActive) return;
       if (bot.targetDigBlock) return;
-      if (!bot.controlState.forward && !bot.pathfinder?.isMoving?.()) return;
+
+      const moving = !!(bot.controlState.forward || bot.pathfinder?.isMoving?.());
+      if (moving && bot.entity.onGround && !bot.entity.isInWater) {
+        bot.setControlState('sprint', true);
+      }
+
       const yaw = bot.entity.yaw;
       const dx = -Math.sin(yaw);
       const dz = -Math.cos(yaw);
-      const front = bot.blockAt(bot.entity.position.offset(dx * 0.8, 0, dz * 0.8));
-      const frontUp = bot.blockAt(bot.entity.position.offset(dx * 0.8, 1, dz * 0.8));
-      const step = front && front.boundingBox === 'block' && (!frontUp || frontUp.boundingBox !== 'block');
-      if (step && bot.entity.onGround) {
+      const front = bot.blockAt(bot.entity.position.offset(dx * 0.9, 0, dz * 0.9));
+      const frontUp = bot.blockAt(bot.entity.position.offset(dx * 0.9, 1, dz * 0.9));
+      const blocked = front && front.boundingBox === 'block';
+      const canStep = blocked && (!frontUp || frontUp.boundingBox !== 'block');
+      const wallAhead = blocked && frontUp && frontUp.boundingBox === 'block';
+
+      const now = Date.now();
+      if (canStep && bot.entity.onGround && moving && now - lastJump > 250) {
         bot.setControlState('jump', true);
+        lastJump = now;
+        setTimeout(() => { try { bot.setControlState('jump', false); } catch {} }, 140);
+      }
+      if (wallAhead && bot.entity.onGround && now - lastJump > 600) {
+        bot.setControlState('jump', true);
+        lastJump = now;
         setTimeout(() => { try { bot.setControlState('jump', false); } catch {} }, 120);
       }
     } catch {}
@@ -371,13 +389,40 @@ export async function runPassiveSkillTick(agent) {
       const b = bot.blockAt(pf.offset(o[0], 0, o[1]));
       if (b && b.boundingBox === 'block') walls++;
     }
-    if (wet || walls >= 2) {
+    const invCount = bot.inventory.items().reduce((a, i) => a + i.count, 0);
+    const posKey = pf.x + ',' + pf.y + ',' + pf.z;
+    if (!bot._passiveLastPos) bot._passiveLastPos = posKey;
+    if (!bot._passiveStillTicks) bot._passiveStillTicks = 0;
+    if (bot._passiveLastPos === posKey) bot._passiveStillTicks++;
+    else { bot._passiveStillTicks = 0; bot._passiveLastPos = posKey; }
+    const stuckIdle = bot._passiveStillTicks >= 2;
+
+    if (wet || walls >= 2 || stuckIdle || invCount < 8) {
       try { agent.actions?.stop?.(); } catch {}
       try { agent.self_prompter?.stopLoop?.(); } catch {}
+      try { agent.coder?.stop?.(); } catch {}
       try { bot.clearControlStates(); } catch {}
-      if (wet) await dryFeet(bot);
-      await escapeHole(bot);
-      return;
+      if (wet || walls >= 2) {
+        if (wet) await dryFeet(bot);
+        await escapeHole(bot);
+        return;
+      }
+      if (stuckIdle) {
+        console.log('[PASSIVE] stuck idle → dig face + sprint');
+        try {
+          const look = bot.blockAtCursor?.(4);
+          if (look && look.boundingBox === 'block' && !/bedrock|barrier/.test(look.name || '')) {
+            await dig(bot, look);
+          }
+        } catch {}
+        bot.setControlState('forward', true);
+        bot.setControlState('sprint', true);
+        bot.setControlState('jump', true);
+        await sleep(600);
+        bot.clearControlStates();
+        bot._passiveStillTicks = 0;
+        return;
+      }
     }
   } catch {}
 
@@ -487,6 +532,8 @@ export async function runPassiveSkillTick(agent) {
   const yaw = bot.entity.yaw + (Math.random() > 0.5 ? 0.9 : -0.9);
   try { await bot.look(yaw, 0, true); } catch {}
   await bridgeGap(bot);
+  bot.setControlState('forward', true);
+  bot.setControlState('sprint', true);
   const tx = bot.entity.position.x - Math.sin(yaw) * 6;
   const tz = bot.entity.position.z - Math.cos(yaw) * 6;
   await goto(bot, tx, bot.entity.position.y, tz, 2);
@@ -525,6 +572,6 @@ export function startPassiveSkills(agent) {
   };
 
   setTimeout(tick, 1500);
-  setInterval(tick, 3500);
-  console.log('[PASSIVE] BRAIN ON — dry feet + dig stair out of holes');
+  setInterval(tick, 2500);
+  console.log('[PASSIVE] BRAIN ON — sprint+jump + interrupt Thinking');
 }
