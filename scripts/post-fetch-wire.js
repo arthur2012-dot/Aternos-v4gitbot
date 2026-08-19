@@ -18,6 +18,7 @@ function copy(from, to) {
 copy('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 copy('scripts/passive-skills.js', 'src/agent/passive-skills.js');
 copy('scripts/escape-hole.js', 'src/agent/escape-hole.js');
+copy('scripts/autobot-skills.js', 'src/agent/autobot-skills.js');
 copy('scripts/nav-stack.js', 'src/agent/nav-stack.js');
 copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
 copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
@@ -96,30 +97,7 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
       `this.bot.once('spawn', async () => {${block}`
     );
   }
-} else {
-  if (!agent.includes('startMobileViewer')) {
-    agent = agent.replace(
-      /startTaskGuard\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] task-guard', e\.message\); \}/,
-      `startTaskGuard(this);
-            } catch (e) { console.warn('[DreamBot] task-guard', e.message); }
-            try {
-                const { startMobileViewer } = await import('./mobile-viewer.js');
-                await startMobileViewer(this.bot);
-            } catch (e) { console.warn('[DreamBot] viewer', e.message); }`
-    );
-  }
-  if (!agent.includes('startKonekoBehaviors')) {
-    agent = agent.replace(
-      /startPvpCombat\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] pvp', e\.message\); \}/,
-      `startPvpCombat(this);
-            } catch (e) { console.warn('[DreamBot] pvp', e.message); }
-            try {
-                const { startKonekoBehaviors } = await import('./koneko-behaviors.js');
-                await startKonekoBehaviors(this);
-            } catch (e) { console.warn('[DreamBot] koneko', e.message); }`
-    );
-  }
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] mobile viewer + full stack + escape-hole');
+console.log('[post-wire] full stack + autobot-skills');
