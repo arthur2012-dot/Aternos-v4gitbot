@@ -19,6 +19,7 @@ copy('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 copy('scripts/passive-skills.js', 'src/agent/passive-skills.js');
 copy('scripts/escape-hole.js', 'src/agent/escape-hole.js');
 copy('scripts/autobot-skills.js', 'src/agent/autobot-skills.js');
+copy('scripts/house-builder.js', 'src/agent/house-builder.js');
 copy('scripts/nav-stack.js', 'src/agent/nav-stack.js');
 copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
 copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
@@ -100,4 +101,4 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] full stack + autobot-skills');
+console.log('[post-wire] full stack + house-builder');
