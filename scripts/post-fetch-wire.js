@@ -19,7 +19,6 @@ copy('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 copy('scripts/passive-skills.js', 'src/agent/passive-skills.js');
 copy('scripts/nav-stack.js', 'src/agent/nav-stack.js');
 copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
-copy('scripts/voyager-skills.js', 'src/agent/voyager-skills.js');
 copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
 copy('scripts/task-guard.js', 'src/agent/task-guard.js');
 
@@ -27,68 +26,89 @@ const agentPath = join(ROOT, 'src/agent/agent.js');
 if (!existsSync(agentPath)) process.exit(0);
 
 let agent = readFileSync(agentPath, 'utf8');
-let changed = false;
 
-// Ensure NAV interval does not interrupt while pathing/acting
-if (agent.includes('[DreamBot] NAV BRAIN') && !agent.includes('[DreamBot] skip if busy')) {
+// Suppress auto-prompt stop spam in chat
+if (!agent.includes('[DreamBot] suppressed')) {
   agent = agent.replace(
-    /setInterval\(async \(\) => \{\s*if \(this\._navBusy\) return;\s*try \{\s*const bot = this\.bot;\s*if \(!bot\?\.entity\) return;/
-    ,
-    `setInterval(async () => {
-                if (this._navBusy) return;
-                try {
-                    const bot = this.bot;
-                    if (!bot?.entity) return;
-                    // [DreamBot] skip if busy — do NOT stop mid-task for player/terrain micro-nav
-                    try {
-                        if (this.actions?.executing) return;
-                        if (bot.pathfinder?.isMoving?.()) return;
-                        if (bot.targetDigBlock) return;
-                        if (bot._dreamPvpActive) return;
-                    } catch {}`
+    /async openChat\(message\) \{/,
+    `async openChat(message) {
+        const __m = String(message || '');
+        if (!__m.trim()) return;
+        if (/não usou o comando|nao usou o comando|solicita[cç][aã]o autom[aá]tica|auto-prompt|did not use command|Parando a solicita|40 prompts/i.test(__m)) {
+            console.warn('[DreamBot] suppressed stop-msg');
+            return;
+        }
+        if (/groq|rate.?limit|api key|exiting|hello world|PathStopped|replaceAll|model_not_found/i.test(__m)) {
+            console.warn('[DreamBot] suppressed:', __m.slice(0, 40));
+            return;
+        }`
   );
-  changed = true;
-  console.log('[post-wire] NAV skip-if-busy');
 }
 
-if (!agent.includes('startTaskGuard')) {
-  const inject = `
+// Force inject full passive stack once on spawn
+if (!agent.includes('[DreamBot] FULL STACK')) {
+  const block = `
+            // [DreamBot] FULL STACK — passive first
             try {
-                const { startTaskGuard } = await import('./task-guard.js');
-                startTaskGuard(this);
-            } catch (e) { console.warn('[DreamBot] task-guard', e.message); }
+                const { startPassiveSkills } = await import('./passive-skills.js');
+                startPassiveSkills(this);
+            } catch (e) { console.warn('[DreamBot] passive', e.message); }
+            try {
+                const { startNavStack } = await import('./nav-stack.js');
+                await startNavStack(this);
+            } catch (e) {
+                try {
+                    const { startBaritoneNav } = await import('./baritone-nav.js');
+                    await startBaritoneNav(this);
+                } catch (e2) { console.warn('[DreamBot] nav', e2.message); }
+            }
+            try {
+                const { startPvpCombat } = await import('./pvp-combat.js');
+                startPvpCombat(this);
+            } catch (e) { console.warn('[DreamBot] pvp', e.message); }
             try {
                 const { startAntiFreeze } = await import('./anti-freeze.js');
                 startAntiFreeze(this);
             } catch (e) { console.warn('[DreamBot] anti-freeze', e.message); }
-`;
-  if (agent.includes("this.bot.once('spawn'")) {
-    // append near other stack loads if missing anti-freeze
-    if (!agent.includes('startAntiFreeze')) {
-      agent = agent.replace(
-        /this\.bot\.once\('spawn', async \(\) => \{/
-        ,
-        `this.bot.once('spawn', async () => {${inject}`
-      );
-      changed = true;
-    } else if (!agent.includes('startTaskGuard')) {
-      agent = agent.replace(
-        /startAntiFreeze\(this\);/
-        ,
-        `startAntiFreeze(this);
             try {
                 const { startTaskGuard } = await import('./task-guard.js');
                 startTaskGuard(this);
-            } catch (e) { console.warn('[DreamBot] task-guard', e.message); }`
-      );
-      changed = true;
-    }
+            } catch (e) { console.warn('[DreamBot] task-guard', e.message); }
+            // Keep body moving even if LLM dies
+            setInterval(() => {
+                try {
+                    if (!this.bot?.entity) return;
+                    if (this.bot._dreamPvpActive) return;
+                    if (this.actions?.executing) return;
+                    if (this.bot.pathfinder?.isMoving?.()) return;
+                    const v = this.bot.entity.velocity;
+                    const spd = Math.sqrt(v.x*v.x + v.z*v.z);
+                    if (spd < 0.02) {
+                        this.bot.setControlState('forward', true);
+                        this.bot.setControlState('sprint', true);
+                        this.bot.setControlState('jump', true);
+                        setTimeout(() => {
+                            try {
+                                this.bot.clearControlStates();
+                                this.bot.look(this.bot.entity.yaw + 1, 0);
+                            } catch {}
+                        }, 700);
+                    }
+                } catch {}
+            }, 10000);
+`;
+  if (agent.includes("this.bot.once('spawn'")) {
+    agent = agent.replace(
+      /this\.bot\.once\('spawn', async \(\) => \{/,
+      `this.bot.once('spawn', async () => {${block}`
+    );
+    writeFileSync(agentPath, agent);
+    console.log('[post-wire] FULL STACK injected');
+  } else {
+    writeFileSync(agentPath, agent);
+    console.warn('[post-wire] no spawn hook found');
   }
-}
-
-if (changed) {
-  writeFileSync(agentPath, agent);
-  console.log('[post-wire] task continuity patched');
 } else {
-  console.log('[post-wire] task continuity ok');
+  writeFileSync(agentPath, agent);
+  console.log('[post-wire] stack already present');
 }
