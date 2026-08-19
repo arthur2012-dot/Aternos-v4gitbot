@@ -1,6 +1,6 @@
 /**
  * PASSIVE BRAIN — pure code, no LLM.
- * Level ABOVE Altera Builder Bot: real house, gap bridge, tool replace, home memory.
+ * Above Altera Builder Bot + path toward beating the game (diamonds).
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -63,7 +63,7 @@ async function dig(bot, block) {
       inv.find(i => /_pickaxe$/.test(i.name));
     if (tool) { try { await bot.equip(tool, 'hand'); } catch {} }
     await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
-    await race(bot.dig(block), 8000);
+    await race(bot.dig(block), 12000);
     return true;
   } catch {
     try { bot.stopDigging(); } catch {}
@@ -71,7 +71,6 @@ async function dig(bot, block) {
   }
 }
 
-/** Place one block against ref + face. Returns true on success. */
 async function placeAt(bot, refBlock, faceVec) {
   if (!refBlock) return false;
   try {
@@ -81,15 +80,9 @@ async function placeAt(bot, refBlock, faceVec) {
     await bot.lookAt(refBlock.position.offset(0.5, 0.5, 0.5), true);
     await race(bot.placeBlock(refBlock, faceVec), 3500);
     return true;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-/**
- * Simple forward bridge: if air under next step, place block.
- * Better than Altera bot which just falls into holes.
- */
 async function bridgeGap(bot) {
   try {
     const yaw = bot.entity.yaw;
@@ -100,13 +93,10 @@ async function bridgeGap(bot) {
     const underNext = bot.blockAt(next);
     const airish = !underNext || underNext.name === 'air' || underNext.name === 'cave_air' || underNext.name === 'water';
     if (!airish) return false;
-
     const build = items(bot).find(i => BUILD_RE.test(i.name));
     if (!build || build.count < 1) return false;
-
     console.log('[PASSIVE] bridge gap');
     await bot.equip(build, 'hand');
-    // stand at edge, look down-forward, place
     const edge = bot.blockAt(feet.offset(0, -1, 0));
     if (!edge) return false;
     await bot.lookAt(next.offset(0.5, 1, 0.5), true);
@@ -115,10 +105,7 @@ async function bridgeGap(bot) {
     try {
       await race(bot.placeBlock(edge, new Vec3(dx, 0, dz)), 2500);
     } catch {
-      // fallback: place on top of edge toward gap
-      try {
-        await race(bot.placeBlock(edge, new Vec3(0, 1, 0)), 2000);
-      } catch {}
+      try { await race(bot.placeBlock(edge, new Vec3(0, 1, 0)), 2000); } catch {}
     }
     bot.setControlState('sneak', false);
     bot.setControlState('forward', true);
@@ -137,12 +124,12 @@ function findBlock(bot, names, dist = 32) {
     for (const name of names) {
       const id = mcData.blocksByName[name]?.id;
       if (id == null) continue;
-      const found = bot.findBlocks({ matching: id, maxDistance: dist, count: 8 });
+      const found = bot.findBlocks({ matching: id, maxDistance: dist, count: 12 });
       for (const p of found) {
         const b = bot.blockAt(p);
         if (!b) continue;
         const under = bot.blockAt(p.offset(0, -1, 0));
-        if (under && /water|lava/.test(under.name || '')) continue;
+        if (under && /lava/.test(under.name || '')) continue;
         return b;
       }
     }
@@ -266,31 +253,34 @@ async function replaceBrokenTools(bot) {
   const sticks = count(bot, 'stick');
   const cobble = count(bot, 'cobblestone') + count(bot, 'stone');
   const iron = count(bot, 'iron_ingot');
+  const diamonds = count(bot, 'diamond');
   const anyPick = hasRe(bot, /pickaxe/);
   const anyAxe = hasRe(bot, /_axe$/);
   const anySword = hasRe(bot, /sword/);
   const ironPick = hasRe(bot, /iron_pickaxe/);
+  const diaPick = hasRe(bot, /diamond_pickaxe/);
 
   if (!anyPick || !anyAxe || !anySword) clearToolCraftCooldown();
 
   if (!anyPick) {
     console.log('[PASSIVE] pickaxe BROKEN/missing → replace');
+    if (diamonds >= 3 && sticks >= 2 && await craft(bot, 'diamond_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
     if (iron >= 3 && sticks >= 2 && await craft(bot, 'iron_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
     if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
     if (planks >= 3 && sticks >= 2 && await craft(bot, 'wooden_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
     return false;
   }
-  if (almostBroken(bot, /pickaxe/) && !ironPick) {
-    if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_pickaxe', 1)) {
-      console.log('[PASSIVE] spare pickaxe');
-      return true;
-    }
+  if (almostBroken(bot, /pickaxe/) && !diaPick) {
+    if (iron >= 3 && sticks >= 2 && await craft(bot, 'iron_pickaxe', 1)) return true;
+    if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_pickaxe', 1)) return true;
   }
   if (!anyAxe) {
+    if (iron >= 3 && sticks >= 2 && await craft(bot, 'iron_axe', 1)) return true;
     if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_axe', 1)) return true;
     if (planks >= 3 && sticks >= 2 && await craft(bot, 'wooden_axe', 1)) return true;
   }
   if (!anySword) {
+    if (iron >= 2 && sticks >= 1 && await craft(bot, 'iron_sword', 1)) return true;
     if (cobble >= 2 && sticks >= 1 && await craft(bot, 'stone_sword', 1)) return true;
     if (planks >= 2 && sticks >= 1 && await craft(bot, 'wooden_sword', 1)) return true;
   }
@@ -349,27 +339,19 @@ async function escapeHole(bot) {
   } catch { return false; }
 }
 
-/**
- * Real 5x5 starter house (floor + walls + roof + door gap + torch).
- * Better than Altera Builder Bot's random mess.
- */
 async function buildShelter(bot, agent) {
   if (bot._dreamHomeBuilt || agent._dreamHomeBuilt) return false;
-
   const buildItems = items(bot).filter(i => BUILD_RE.test(i.name));
   const totalBlocks = buildItems.reduce((a, i) => a + i.count, 0);
-  if (totalBlocks < 40) return false; // need enough material
-
-  // Prefer flat ground
+  if (totalBlocks < 40) return false;
   const origin = bot.entity.position.floored();
   const ground = bot.blockAt(origin.offset(0, -1, 0));
   if (!ground || ground.boundingBox !== 'block') return false;
 
   console.log('[PASSIVE] building HOUSE 5x5');
-  const size = 5; // 0..4 inclusive = 5 blocks
+  const size = 5;
   let placed = 0;
 
-  // Floor
   for (let x = 0; x < size; x++) {
     for (let z = 0; z < size; z++) {
       const pos = origin.offset(x, -1, z);
@@ -377,22 +359,18 @@ async function buildShelter(bot, agent) {
       if (b && b.name !== 'air' && b.boundingBox === 'block') continue;
       const below = bot.blockAt(pos.offset(0, -1, 0));
       const ref = below && below.boundingBox === 'block' ? below : ground;
-      // walk near
-      const d = bot.entity.position.distanceTo(pos);
-      if (d > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
+      if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
       if (await placeAt(bot, ref, new Vec3(0, 1, 0))) placed++;
       await sleep(50);
     }
   }
 
-  // Walls height 2 (y=0 and y=1), door at (2,0,0) and (2,1,0)
   for (let y = 0; y < 2; y++) {
     for (let x = 0; x < size; x++) {
       for (const z of [0, size - 1]) {
-        if (z === 0 && x === 2) continue; // door
+        if (z === 0 && x === 2) continue;
         const pos = origin.offset(x, y, z);
-        const existing = bot.blockAt(pos);
-        if (existing && existing.boundingBox === 'block') continue;
+        if (bot.blockAt(pos)?.boundingBox === 'block') continue;
         const ref = bot.blockAt(pos.offset(0, -1, 0));
         if (!ref || ref.boundingBox !== 'block') continue;
         if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
@@ -403,8 +381,7 @@ async function buildShelter(bot, agent) {
     for (let z = 1; z < size - 1; z++) {
       for (const x of [0, size - 1]) {
         const pos = origin.offset(x, y, z);
-        const existing = bot.blockAt(pos);
-        if (existing && existing.boundingBox === 'block') continue;
+        if (bot.blockAt(pos)?.boundingBox === 'block') continue;
         const ref = bot.blockAt(pos.offset(0, -1, 0));
         if (!ref || ref.boundingBox !== 'block') continue;
         if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
@@ -414,12 +391,10 @@ async function buildShelter(bot, agent) {
     }
   }
 
-  // Roof at y=2
   for (let x = 0; x < size; x++) {
     for (let z = 0; z < size; z++) {
       const pos = origin.offset(x, 2, z);
-      const existing = bot.blockAt(pos);
-      if (existing && existing.boundingBox === 'block') continue;
+      if (bot.blockAt(pos)?.boundingBox === 'block') continue;
       const ref = bot.blockAt(pos.offset(0, -1, 0));
       if (!ref || ref.boundingBox !== 'block') continue;
       if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y + 1, pos.z, 2);
@@ -428,8 +403,7 @@ async function buildShelter(bot, agent) {
     }
   }
 
-  // Torch inside
-  if (has(bot, 'torch') || count(bot, 'torch') > 0) {
+  if (count(bot, 'torch') > 0) {
     try {
       const torch = items(bot).find(i => i.name === 'torch');
       if (torch) {
@@ -443,7 +417,6 @@ async function buildShelter(bot, agent) {
     } catch {}
   }
 
-  // Remember home (center of floor)
   const home = origin.offset(2, 0, 2);
   bot._dreamHome = home;
   bot._dreamHomeBuilt = true;
@@ -509,8 +482,10 @@ export async function runPassiveSkillTick(agent) {
   const anyPick = hasRe(bot, /pickaxe/);
   const stonePick = hasRe(bot, /stone_pickaxe/);
   const ironPick = hasRe(bot, /iron_pickaxe/);
+  const diaPick = hasRe(bot, /diamond_pickaxe/);
   const iron = count(bot, 'iron_ingot');
   const rawIron = count(bot, 'raw_iron');
+  const diamonds = count(bot, 'diamond');
   const coal = count(bot, 'coal') + count(bot, 'charcoal');
   const hasFurnace = has(bot, 'furnace');
   const buildCount = items(bot).filter(i => BUILD_RE.test(i.name)).reduce((a, i) => a + i.count, 0);
@@ -518,7 +493,6 @@ export async function runPassiveSkillTick(agent) {
   if (await eatIfNeeded(bot)) return;
   if (await replaceBrokenTools(bot)) return;
 
-  // Wood
   if (logs < 10) {
     console.log('[PASSIVE] need wood');
     if (await collect(bot, WOOD, 3, 40)) return;
@@ -551,7 +525,7 @@ export async function runPassiveSkillTick(agent) {
     if (await collect(bot, ['stone', 'cobblestone', 'deepslate'], 6, 28)) return;
   }
 
-  if (cobble >= 3 && sticks >= 2 && !stonePick && !ironPick && canTryCraft('stone_pickaxe')) {
+  if (cobble >= 3 && sticks >= 2 && !stonePick && !ironPick && !diaPick && canTryCraft('stone_pickaxe')) {
     if (await craft(bot, 'stone_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
 
@@ -559,25 +533,53 @@ export async function runPassiveSkillTick(agent) {
     if (await craft(bot, 'furnace', 1)) return;
   }
 
-  if (stonePick || ironPick) {
-    if (coal < 8 && await collect(bot, ['coal_ore', 'deepslate_coal_ore'], 2, 24)) return;
-    if (rawIron + iron < 6 && await collect(bot, ['iron_ore', 'deepslate_iron_ore'], 2, 24)) return;
+  if (stonePick || ironPick || diaPick) {
+    if (coal < 10 && await collect(bot, ['coal_ore', 'deepslate_coal_ore'], 2, 24)) return;
+    if (rawIron + iron < 8 && await collect(bot, ['iron_ore', 'deepslate_iron_ore'], 2, 24)) return;
   }
 
-  if (iron >= 3 && sticks >= 2 && !ironPick && canTryCraft('iron_pickaxe')) {
+  if (iron >= 3 && sticks >= 2 && !ironPick && !diaPick && canTryCraft('iron_pickaxe')) {
     if (await craft(bot, 'iron_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
+  if (iron >= 2 && sticks >= 1 && !hasRe(bot, /iron_sword/) && canTryCraft('iron_sword')) {
+    if (await craft(bot, 'iron_sword', 1)) return;
+  }
 
-  if (coal >= 1 && sticks >= 1 && count(bot, 'torch') < 16 && canTryCraft('torch')) {
+  // DIAMONDS — path toward zerar (3 IAs short style)
+  if (ironPick || diaPick) {
+    if (diamonds < 5) {
+      console.log('[PASSIVE] hunt diamonds');
+      await equipBest(bot, 'pickaxe');
+      // prefer deep levels: go down if high
+      if (bot.entity.position.y > 20) {
+        const below = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0));
+        if (below && /stone|deepslate|dirt|grass/.test(below.name)) {
+          // strip mine style: dig forward at y~12 if possible later
+        }
+      }
+      if (await collect(bot, ['diamond_ore', 'deepslate_diamond_ore'], 1, 40)) return;
+    }
+  }
+
+  if (diamonds >= 3 && sticks >= 2 && !diaPick && canTryCraft('diamond_pickaxe')) {
+    if (await craft(bot, 'diamond_pickaxe', 1)) {
+      await equipBest(bot, 'pickaxe');
+      console.log('[PASSIVE] DIAMOND PICK');
+      return;
+    }
+  }
+  if (diamonds >= 2 && sticks >= 1 && !hasRe(bot, /diamond_sword/) && canTryCraft('diamond_sword')) {
+    if (await craft(bot, 'diamond_sword', 1)) return;
+  }
+
+  if (coal >= 1 && sticks >= 1 && count(bot, 'torch') < 20 && canTryCraft('torch')) {
     if (await craft(bot, 'torch', 4)) return;
   }
 
-  // HOUSE — after tools + materials (better than Altera dumb house)
   if (!bot._dreamHomeBuilt && buildCount >= 40 && anyPick) {
     if (await buildShelter(bot, agent)) return;
   }
 
-  // Night-ish or low health → go home if known
   const time = bot.time?.timeOfDay ?? 0;
   if (bot._dreamHome && (time > 12000 || bot.health < 10)) {
     const h = bot._dreamHome;
@@ -586,10 +588,22 @@ export async function runPassiveSkillTick(agent) {
     return;
   }
 
+  // Cave explore when iron+ (look for diamonds)
+  if (ironPick || diaPick) {
+    console.log('[PASSIVE] cave explore');
+    const yaw = bot.entity.yaw + (Math.random() - 0.5) * 1.2;
+    try { await bot.look(yaw, 0.15, true); } catch {}
+    await bridgeGap(bot);
+    const ty = Math.max(8, bot.entity.position.y - (Math.random() > 0.6 ? 2 : 0));
+    const tx = bot.entity.position.x - Math.sin(yaw) * 12;
+    const tz = bot.entity.position.z - Math.cos(yaw) * 12;
+    await goto(bot, tx, ty, tz, 2);
+    return;
+  }
+
   console.log('[PASSIVE] explore');
   const yaw = bot.entity.yaw + (Math.random() > 0.5 ? 0.7 : -0.7);
   try { await bot.look(yaw, 0, true); } catch {}
-  // try bridge if gap ahead before pathing
   await bridgeGap(bot);
   const tx = bot.entity.position.x - Math.sin(yaw) * 10;
   const tz = bot.entity.position.z - Math.cos(yaw) * 10;
@@ -630,5 +644,5 @@ export function startPassiveSkills(agent) {
 
   setTimeout(tick, 2500);
   setInterval(tick, 6000);
-  console.log('[PASSIVE] BRAIN ON — house + bridge + tool break + auto-jump (above Builder Bot)');
+  console.log('[PASSIVE] BRAIN ON — house + diamonds + combo path (above 3 IAs early game)');
 }
