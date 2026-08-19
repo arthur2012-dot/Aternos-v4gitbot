@@ -1,6 +1,6 @@
 /**
- * V5: text viewer listens on :3001 at path /
- * Public URL /viewer → proxy rewrites to /
+ * V6 — 3D prismarine-viewer with prefix /viewer
+ * Forward full path, hook WebSocket upgrade
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import { join } from 'path';
@@ -8,7 +8,6 @@ import { join } from 'path';
 const ROOT = process.cwd();
 const file = join(ROOT, 'src', 'mindcraft', 'mindserver.js');
 const base = join(ROOT, '.mindcraft-base', 'src', 'mindcraft', 'mindserver.js');
-const publicDir = join(ROOT, 'src', 'mindcraft', 'public');
 
 function restoreFromBase() {
   if (!existsSync(base)) return false;
@@ -23,7 +22,7 @@ if (!existsSync(file) && !restoreFromBase()) process.exit(0);
 let src = readFileSync(file, 'utf8');
 
 if (
-  (src.includes('DREAMBOT_VIEWER_PROXY') && !src.includes('DREAMBOT_VIEWER_PROXY_V5')) ||
+  (src.includes('DREAMBOT_VIEWER_PROXY') && !src.includes('DREAMBOT_VIEWER_PROXY_V6')) ||
   !src.includes('createMindServer') ||
   src.split('(').length !== src.split(')').length
 ) {
@@ -38,11 +37,11 @@ if (/const host = ['"]localhost['"]/.test(src)) {
   );
 }
 
-if (!src.includes('DREAMBOT_VIEWER_PROXY_V5')) {
+if (!src.includes('DREAMBOT_VIEWER_PROXY_V6')) {
   src = src.replace(/\n\s*\/\/ DREAMBOT_VIEWER_PROXY[\s\S]*?viewer proxy[\s\S]*?\n/g, '\n');
 
   const proxyBlock = `
-    // DREAMBOT_VIEWER_PROXY_V5 — text viewer on :3001 root
+    // DREAMBOT_VIEWER_PROXY_V6 — 3D prefix /viewer
     try {
         import('http-proxy-middleware').then(function (mod) {
             var createProxyMiddleware = mod.createProxyMiddleware;
@@ -51,21 +50,35 @@ if (!src.includes('DREAMBOT_VIEWER_PROXY_V5')) {
             var _vp = createProxyMiddleware({
                 target: viewerTarget,
                 changeOrigin: true,
+                ws: true,
+                xfwd: true,
                 pathFilter: function (pathname) {
-                    return pathname === '/viewer' || pathname.indexOf('/viewer/') === 0 || pathname === '/see';
-                },
-                pathRewrite: function (path) {
-                    return '/';
+                    return pathname === '/viewer' || (pathname && pathname.indexOf('/viewer/') === 0);
                 }
             });
             app.use(_vp);
-            console.log('[DreamBot] /viewer → text viewer ' + viewerTarget);
+            console.log('[DreamBot] 3D proxy V6 /viewer → ' + viewerTarget);
+            setTimeout(function () {
+                try {
+                    if (typeof server !== 'undefined' && server && typeof server.on === 'function') {
+                        server.on('upgrade', function (req, socket, head) {
+                            try {
+                                var u = String(req.url || '');
+                                if (u.indexOf('/viewer') === 0) {
+                                    _vp.upgrade(req, socket, head);
+                                }
+                            } catch (err) {}
+                        });
+                        console.log('[DreamBot] 3D WS upgrade V6');
+                    }
+                } catch (err) {}
+            }, 500);
         }).catch(function (e) {
-            console.warn('[DreamBot] viewer proxy', e && e.message);
+            console.warn('[DreamBot] proxy', e && e.message);
         });
-        app.get('/see', function (req, res) { res.redirect(302, '/viewer'); });
+        app.get('/see', function (req, res) { res.redirect(302, '/viewer/'); });
     } catch (e) {
-        console.warn('[DreamBot] viewer proxy', e && e.message);
+        console.warn('[DreamBot] proxy', e && e.message);
     }
 `;
 
@@ -77,16 +90,8 @@ if (!src.includes('DREAMBOT_VIEWER_PROXY_V5')) {
   }
 
   writeFileSync(file, src);
-  console.log('[viewer-proxy] V5 injected');
+  console.log('[viewer-proxy] V6 3D injected');
 } else {
   writeFileSync(file, src);
-  console.log('[viewer-proxy] V5 already present');
+  console.log('[viewer-proxy] V6 already present');
 }
-
-try {
-  mkdirSync(publicDir, { recursive: true });
-  writeFileSync(
-    join(publicDir, 'mobile-view.html'),
-    '<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=/viewer"></head><body>Abrindo visao...</body></html>'
-  );
-} catch {}
