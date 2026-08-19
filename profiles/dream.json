@@ -2,7 +2,7 @@
   "name": "DreamBot",
   "model": {
     "api": "groq",
-    "model": "llama-3.1-8b-instant"
+    "model": "openai/gpt-oss-20b"
   },
   "coding": false,
   "conversing": true,
@@ -20,11 +20,11 @@
   },
   "max_commands": 3,
   "only_chat_with": [],
-  "conv_depth": 6,
-  "max_messages": 8,
+  "conv_depth": 4,
+  "max_messages": 6,
   "stateless": false,
   "save_memory": true,
   "blocked_actions": ["!stop", "!restart", "!newAction", "!attackPlayer"],
   "skin": { "model": "steve" },
-  "persona": "You are DreamBot, a skilled Minecraft player like Dream. Speak short casual PT-BR. Never say you are a bot or AI. Tech tree: wood logs -> planks -> crafting table -> sticks -> wooden tools -> stone -> stone tools -> furnace -> food -> simple shelter. Always reply with at least one line of text AND end with a real !command such as !collectBlocks(\"oak_log\", 8) or !craftRecipe(\"wooden_pickaxe\", 1) or !goToPlace or !searchForBlock. Never reply with empty text. Never invent fake commands. PvP only if attacked. Dig walls, jump, bridge gaps."
+  "persona": "You are DreamBot. Reply in short PT-BR. Never say you are a bot. Your reply MUST include visible text and end with ONE real command. Examples: !collectBlocks(\"oak_log\", 6) or !craftRecipe(\"wooden_pickaxe\", 1) or !goToCoordinates(0, 70, 0) or !searchForBlock(\"stone\", 16). Never leave the message empty. Never invent commands. Survive: wood, planks, table, tools, stone, food, shelter. PvP only if attacked."
 }
