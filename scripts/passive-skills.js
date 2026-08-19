@@ -1,6 +1,7 @@
 /**
  * PASSIVE BRAIN — pure code, no LLM.
- * Emergency food when dying (1 HP / 0 hunger) — does NOT wait for Groq.
+ * Emergency food when dying — does NOT wait for Groq.
+ * Dig-in-face + tight hole escape + respect nav lock.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -70,18 +71,6 @@ async function dig(bot, block) {
     try { bot.stopDigging(); } catch {}
     return false;
   }
-}
-
-async function placeAt(bot, refBlock, faceVec) {
-  if (!refBlock) return false;
-  try {
-    const build = items(bot).find(i => BUILD_RE.test(i.name));
-    if (!build) return false;
-    await bot.equip(build, 'hand');
-    await bot.lookAt(refBlock.position.offset(0.5, 0.5, 0.5), true);
-    await race(bot.placeBlock(refBlock, faceVec), 3500);
-    return true;
-  } catch { return false; }
 }
 
 async function bridgeGap(bot) {
@@ -157,9 +146,7 @@ async function collect(bot, names, need, dist = 36) {
   return got > 0;
 }
 
-/** Eat ANY edible in inventory — critical path */
 async function eatIfNeeded(bot) {
-  // always try if hungry or low HP
   if (bot.food >= 18 && bot.health >= 16) return false;
   const food = items(bot).find(i => FOOD_RE.test(i.name));
   if (!food) return false;
@@ -171,32 +158,20 @@ async function eatIfNeeded(bot) {
   } catch { return false; }
 }
 
-/**
- * EMERGENCY: hunt animals / berries / apples when starving or near death.
- * Runs even when Groq is dead (429).
- */
 async function emergencyFood(bot) {
   const critical = bot.health <= 8 || bot.food <= 6;
   if (!critical) return false;
-
   console.log('[PASSIVE] EMERGENCY food hp', bot.health, 'hunger', bot.food);
-
-  // 1) already have food → eat
   if (await eatIfNeeded(bot)) return true;
-
-  // 2) berries bushes
   const berries = findBlock(bot, ['sweet_berry_bush', 'glow_berries'], 16);
   if (berries) {
     await goto(bot, berries.position.x, berries.position.y, berries.position.z, 2);
     try {
       await bot.activateBlock(berries);
-      console.log('[PASSIVE] berries');
       await sleep(400);
       if (await eatIfNeeded(bot)) return true;
     } catch {}
   }
-
-  // 3) kill nearest food mob
   const mob = bot.nearestEntity(e => {
     if (!e || e === bot.entity) return false;
     const n = String(e.name || e.displayName || '');
@@ -219,30 +194,13 @@ async function emergencyFood(bot) {
       } catch {}
       await sleep(400);
     }
-    // pickup
     bot.setControlState('forward', true);
     await sleep(600);
     bot.clearControlStates();
     if (await eatIfNeeded(bot)) return true;
     return true;
   }
-
-  // 4) break leaves for apples / collect crops
-  const leaves = findBlock(bot, ['oak_leaves', 'dark_oak_leaves', 'azalea_leaves'], 12);
-  if (leaves) {
-    await dig(bot, leaves);
-    await sleep(300);
-    if (await eatIfNeeded(bot)) return true;
-  }
-
-  const crop = findBlock(bot, ['wheat', 'carrots', 'potatoes', 'beetroots'], 16);
-  if (crop) {
-    await dig(bot, crop);
-    await sleep(300);
-    if (await eatIfNeeded(bot)) return true;
-  }
-
-  return true; // consumed emergency tick even if nothing found
+  return true;
 }
 
 async function ensureTableNearby(bot) {
@@ -366,51 +324,42 @@ async function replaceBrokenTools(bot) {
 
 async function escapeHole(bot) {
   try {
-    const p = bot.entity.position;
-    const head = bot.blockAt(p.floored().offset(0, 1, 0));
-    const above = bot.blockAt(p.floored().offset(0, 2, 0));
-    const ground = bot.blockAt(p.floored().offset(0, -1, 0));
-    const headSolid = head && head.boundingBox === 'block';
-    const aboveSolid = above && above.boundingBox === 'block';
-    const inHole =
-      headSolid ||
-      (ground && ground.boundingBox === 'block' &&
-        bot.entity.position.y - Math.floor(bot.entity.position.y) < 0.2 &&
-        (() => {
-          let walls = 0;
-          for (const o of [[1,0],[-1,0],[0,1],[0,-1]]) {
-            const b = bot.blockAt(p.floored().offset(o[0], 0, o[1]));
-            if (b && b.boundingBox === 'block') walls++;
-          }
-          return walls >= 3;
-        })());
-    if (!inHole && !headSolid) return false;
-    console.log('[PASSIVE] escape hole');
-    if (headSolid) await dig(bot, head);
-    if (aboveSolid) await dig(bot, above);
+    const p = bot.entity.position.floored();
+    const head = bot.blockAt(p.offset(0, 1, 0));
+    const above = bot.blockAt(p.offset(0, 2, 0));
+    let walls = 0;
     for (const o of [[1,0],[-1,0],[0,1],[0,-1]]) {
-      const side = bot.blockAt(p.floored().offset(o[0], 0, o[1]));
-      const sideUp = bot.blockAt(p.floored().offset(o[0], 1, o[1]));
-      if (side?.boundingBox === 'block') await dig(bot, side);
-      if (sideUp?.boundingBox === 'block') await dig(bot, sideUp);
+      const b = bot.blockAt(p.offset(o[0], 0, o[1]));
+      if (b && b.boundingBox === 'block') walls++;
+    }
+    const headSolid = head && head.boundingBox === 'block';
+    const tight = walls >= 2 || headSolid;
+    if (!tight && !headSolid) return false;
+    console.log('[PASSIVE] escape tight walls=' + walls);
+    const cells = [[0,1,0],[0,2,0],[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[1,1,0],[-1,1,0],[0,1,1],[0,1,-1]];
+    for (const [ox,oy,oz] of cells) {
+      const b = bot.blockAt(p.offset(ox, oy, oz));
+      if (b && b.boundingBox === 'block' && !/bedrock|barrier/.test(b.name||'')) {
+        await dig(bot, b);
+      }
     }
     const scaffold = items(bot).find(i => BUILD_RE.test(i.name));
     if (scaffold) {
       try {
         await bot.equip(scaffold, 'hand');
+        bot.setControlState('sneak', true);
         bot.setControlState('jump', true);
-        await sleep(200);
+        await sleep(250);
         const under = bot.blockAt(bot.entity.position.offset(0, -1, 0));
         if (under) {
-          await bot.lookAt(under.position.offset(0.5, 1, 0.5), true);
           try { await race(bot.placeBlock(under, new Vec3(0, 1, 0)), 2000); } catch {}
         }
-        bot.setControlState('jump', false);
+        bot.clearControlStates();
       } catch { bot.clearControlStates(); }
     }
     bot.setControlState('forward', true);
     bot.setControlState('jump', true);
-    await sleep(400);
+    await sleep(500);
     bot.clearControlStates();
     return true;
   } catch { return false; }
@@ -456,7 +405,21 @@ export async function runPassiveSkillTick(agent) {
   const bot = agent.bot;
   if (!bot?.entity || bot._dreamPvpActive) return;
 
-  // CRITICAL first — ignore Groq / self_preservation stuck
+  // Respect nav lock — dig resource in face instead of new goals
+  if (bot._navBusy || bot.dreamIsNavigating?.()) {
+    try {
+      const look = bot.blockAtCursor?.(4);
+      if (look && (/_log$/.test(look.name) || look.name === 'stone' || look.name === 'cobblestone' || /ore/.test(look.name))) {
+        console.log('[PASSIVE] dig in face', look.name);
+        await dig(bot, look);
+        return;
+      }
+    } catch {}
+    // still try escape if tight
+    if (await escapeHole(bot)) return;
+    return;
+  }
+
   if (await escapeHole(bot)) return;
   if (await emergencyFood(bot)) return;
   if (await bridgeGap(bot)) return;
@@ -545,12 +508,13 @@ export async function runPassiveSkillTick(agent) {
     if (await craft(bot, 'torch', 4)) return;
   }
 
-  console.log('[PASSIVE] explore');
-  const yaw = bot.entity.yaw + (Math.random() > 0.5 ? 0.7 : -0.7);
+  if (bot._navBusy) return;
+  console.log('[PASSIVE] explore short');
+  const yaw = bot.entity.yaw + (Math.random() > 0.5 ? 0.9 : -0.9);
   try { await bot.look(yaw, 0, true); } catch {}
   await bridgeGap(bot);
-  const tx = bot.entity.position.x - Math.sin(yaw) * 10;
-  const tz = bot.entity.position.z - Math.cos(yaw) * 10;
+  const tx = bot.entity.position.x - Math.sin(yaw) * 6;
+  const tz = bot.entity.position.z - Math.cos(yaw) * 6;
   await goto(bot, tx, bot.entity.position.y, tz, 2);
 }
 
@@ -586,8 +550,7 @@ export function startPassiveSkills(agent) {
     }
   };
 
-  // Faster ticks when critical survival
   setTimeout(tick, 1500);
-  setInterval(tick, 4000);
-  console.log('[PASSIVE] BRAIN ON — emergency food + survival (works without Groq)');
+  setInterval(tick, 7000);
+  console.log('[PASSIVE] BRAIN ON — dig-in-face + tight escape + nav lock');
 }
