@@ -3,7 +3,6 @@ import settings from './settings.js';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { readFileSync } from 'fs';
-import http from 'http';
 
 function parseArguments() {
     return yargs(hideBin(process.argv))
@@ -70,45 +69,12 @@ if (process.env.SETTINGS_JSON) {
     }
 }
 
-// Railway: always listen on PORT so domain is healthy even if MindServer shares port
+// Railway PORT = MindServer UI (real app, not plain text)
 const PUBLIC_PORT = Number(process.env.PORT) || Number(settings.mindserver_port) || 8080;
 settings.mindserver_port = PUBLIC_PORT;
 
-let healthServerStarted = false;
-function ensureHealthServer() {
-    if (healthServerStarted) return;
-    healthServerStarted = true;
-    try {
-        const server = http.createServer((req, res) => {
-            res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-            res.end('DreamBot OK — light vision + passive + pvp\n');
-        });
-        server.on('error', (err) => {
-            // Port in use by MindServer — that is fine, app still responds
-            if (err.code === 'EADDRINUSE') {
-                console.log('[DreamBot] PORT already in use (MindServer) — OK');
-            } else {
-                console.warn('[DreamBot] health', err.message);
-            }
-        });
-        server.listen(PUBLIC_PORT, '0.0.0.0', () => {
-            console.log('[DreamBot] health/UI on 0.0.0.0:' + PUBLIC_PORT);
-        });
-    } catch (e) {
-        console.warn('[DreamBot] health skip', e.message);
-    }
-}
-
-// host_public=true for Railway
-try {
-    Mindcraft.init(true, settings.mindserver_port, settings.auto_open_ui);
-} catch (e) {
-    console.warn('[DreamBot] Mindcraft.init', e.message);
-    ensureHealthServer();
-}
-
-// If MindServer didn't bind, still expose health
-setTimeout(ensureHealthServer, 2500);
+// host_public=true → patch-mindserver binds 0.0.0.0 + serves public/ UI
+Mindcraft.init(true, settings.mindserver_port, false);
 
 for (let profile of settings.profiles) {
     try {
@@ -119,3 +85,5 @@ for (let profile of settings.profiles) {
         console.error('[DreamBot] createAgent', e.message);
     }
 }
+
+console.log('[DreamBot] MindServer UI should be on port', PUBLIC_PORT);
