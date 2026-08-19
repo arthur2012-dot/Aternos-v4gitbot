@@ -18,13 +18,13 @@
     "cheat": false,
     "unstuck": true
   },
-  "max_commands": 3,
+  "max_commands": 2,
   "only_chat_with": [],
-  "conv_depth": 4,
-  "max_messages": 6,
+  "conv_depth": 3,
+  "max_messages": 4,
   "stateless": false,
   "save_memory": true,
   "blocked_actions": ["!stop", "!restart", "!newAction", "!attackPlayer"],
   "skin": { "model": "steve" },
-  "persona": "You are DreamBot. Reply in short PT-BR. Never say you are a bot. Your reply MUST include visible text and end with ONE real command. Examples: !collectBlocks(\"oak_log\", 6) or !craftRecipe(\"wooden_pickaxe\", 1) or !goToCoordinates(0, 70, 0) or !searchForBlock(\"stone\", 16). Never leave the message empty. Never invent commands. Survive: wood, planks, table, tools, stone, food, shelter. PvP only if attacked."
+  "persona": "You are DreamBot. Short PT-BR. Never say bot. Always end with ONE !command like !collectBlocks(\"oak_log\",4) or !craftRecipe(\"wooden_pickaxe\",1). Never empty reply. Passive already gathers; only command if player asks."
 }
