@@ -1,15 +1,17 @@
 /**
  * PASSIVE BRAIN — pure code, no LLM.
- * Tool break: detect missing tools, clear craft cooldown, re-craft ASAP.
+ * Level ABOVE Altera Builder Bot: real house, gap bridge, tool replace, home memory.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
 
 const require = createRequire(import.meta.url);
 const { goals } = pathfinder;
+const Vec3 = require('vec3').Vec3;
 
 const WOOD = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log','pale_oak_log'];
 const FOOD_RE = /cooked_|bread|apple|carrot|potato|beef|pork|chicken|mutton|cod|salmon|melon|sweet_berries|glow_berries/;
+const BUILD_RE = /dirt|cobblestone|netherrack|planks|stone$|andesite|granite|diorite|tuff|deepslate/;
 
 const craftCooldown = new Map();
 
@@ -32,16 +34,10 @@ async function race(p, ms) {
 }
 
 function canTryCraft(name) {
-  const until = craftCooldown.get(name) || 0;
-  return Date.now() >= until;
+  return Date.now() >= (craftCooldown.get(name) || 0);
 }
-function markCraftFail(name) {
-  craftCooldown.set(name, Date.now() + 45000);
-}
-function markCraftOk(name) {
-  craftCooldown.delete(name);
-}
-/** When a tool breaks, allow re-craft immediately */
+function markCraftFail(name) { craftCooldown.set(name, Date.now() + 45000); }
+function markCraftOk(name) { craftCooldown.delete(name); }
 function clearToolCraftCooldown() {
   for (const k of [...craftCooldown.keys()]) {
     if (/pickaxe|axe|sword|shovel|hoe/.test(k)) craftCooldown.delete(k);
@@ -71,6 +67,66 @@ async function dig(bot, block) {
     return true;
   } catch {
     try { bot.stopDigging(); } catch {}
+    return false;
+  }
+}
+
+/** Place one block against ref + face. Returns true on success. */
+async function placeAt(bot, refBlock, faceVec) {
+  if (!refBlock) return false;
+  try {
+    const build = items(bot).find(i => BUILD_RE.test(i.name));
+    if (!build) return false;
+    await bot.equip(build, 'hand');
+    await bot.lookAt(refBlock.position.offset(0.5, 0.5, 0.5), true);
+    await race(bot.placeBlock(refBlock, faceVec), 3500);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Simple forward bridge: if air under next step, place block.
+ * Better than Altera bot which just falls into holes.
+ */
+async function bridgeGap(bot) {
+  try {
+    const yaw = bot.entity.yaw;
+    const dx = Math.round(-Math.sin(yaw));
+    const dz = Math.round(-Math.cos(yaw));
+    const feet = bot.entity.position.floored();
+    const next = feet.offset(dx, -1, dz);
+    const underNext = bot.blockAt(next);
+    const airish = !underNext || underNext.name === 'air' || underNext.name === 'cave_air' || underNext.name === 'water';
+    if (!airish) return false;
+
+    const build = items(bot).find(i => BUILD_RE.test(i.name));
+    if (!build || build.count < 1) return false;
+
+    console.log('[PASSIVE] bridge gap');
+    await bot.equip(build, 'hand');
+    // stand at edge, look down-forward, place
+    const edge = bot.blockAt(feet.offset(0, -1, 0));
+    if (!edge) return false;
+    await bot.lookAt(next.offset(0.5, 1, 0.5), true);
+    bot.setControlState('sneak', true);
+    await sleep(80);
+    try {
+      await race(bot.placeBlock(edge, new Vec3(dx, 0, dz)), 2500);
+    } catch {
+      // fallback: place on top of edge toward gap
+      try {
+        await race(bot.placeBlock(edge, new Vec3(0, 1, 0)), 2000);
+      } catch {}
+    }
+    bot.setControlState('sneak', false);
+    bot.setControlState('forward', true);
+    await sleep(200);
+    bot.clearControlStates();
+    return true;
+  } catch {
+    bot.clearControlStates();
     return false;
   }
 }
@@ -116,28 +172,25 @@ async function collect(bot, names, need, dist = 36) {
 async function ensureTableNearby(bot) {
   const near = bot.findBlock({ matching: b => b?.name === 'crafting_table', maxDistance: 4 });
   if (near) return near;
-
-  if (has(bot, 'crafting_table')) {
-    try {
-      const item = items(bot).find(i => i.name === 'crafting_table');
-      await bot.equip(item, 'hand');
-      const ref = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-      if (ref) {
-        const yaw = bot.entity.yaw;
-        const fx = Math.round(-Math.sin(yaw));
-        const fz = Math.round(-Math.cos(yaw));
-        const against = bot.blockAt(bot.entity.position.offset(fx, -1, fz)) || ref;
-        await bot.lookAt(against.position.offset(0.5, 1, 0.5), true);
-        await race(bot.placeBlock(against, new (require('vec3').Vec3)(0, 1, 0)), 4000);
-        console.log('[PASSIVE] placed crafting_table');
-        await sleep(400);
-        return bot.findBlock({ matching: b => b?.name === 'crafting_table', maxDistance: 4 });
-      }
-    } catch (e) {
-      console.warn('[PASSIVE] place table', (e.message || '').slice(0, 40));
-    }
+  if (!has(bot, 'crafting_table')) return null;
+  try {
+    const item = items(bot).find(i => i.name === 'crafting_table');
+    await bot.equip(item, 'hand');
+    const ref = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+    if (!ref) return null;
+    const yaw = bot.entity.yaw;
+    const fx = Math.round(-Math.sin(yaw));
+    const fz = Math.round(-Math.cos(yaw));
+    const against = bot.blockAt(bot.entity.position.offset(fx, -1, fz)) || ref;
+    await bot.lookAt(against.position.offset(0.5, 1, 0.5), true);
+    await race(bot.placeBlock(against, new Vec3(0, 1, 0)), 4000);
+    console.log('[PASSIVE] placed crafting_table');
+    await sleep(400);
+    return bot.findBlock({ matching: b => b?.name === 'crafting_table', maxDistance: 4 });
+  } catch (e) {
+    console.warn('[PASSIVE] place table', (e.message || '').slice(0, 40));
+    return null;
   }
-  return null;
 }
 
 async function craft(bot, recipeName, n = 1) {
@@ -145,30 +198,19 @@ async function craft(bot, recipeName, n = 1) {
   try {
     const mcData = require('minecraft-data')(bot.version);
     const item = mcData.itemsByName[recipeName];
-    if (!item) {
-      markCraftFail(recipeName);
-      return false;
-    }
-
+    if (!item) { markCraftFail(recipeName); return false; }
     const needsTable = !/planks$|^stick$|^torch$/.test(recipeName);
     let table = null;
     if (needsTable) {
       table = await ensureTableNearby(bot);
       if (!table && !has(bot, 'crafting_table')) {
         markCraftFail(recipeName);
-        console.warn('[PASSIVE] no table for', recipeName);
         return false;
       }
       if (!table) table = await ensureTableNearby(bot);
     }
-
     const recipes = bot.recipesFor(item.id, null, 1, table || null);
-    if (!recipes || !recipes.length) {
-      console.warn('[PASSIVE] no recipe', recipeName);
-      markCraftFail(recipeName);
-      return false;
-    }
-
+    if (!recipes?.length) { markCraftFail(recipeName); return false; }
     await race(bot.craft(recipes[0], n, table || null), 15000);
     markCraftOk(recipeName);
     console.log('[PASSIVE] craft OK', recipeName, 'x' + n);
@@ -205,17 +247,12 @@ async function equipBest(bot, kind) {
   const list = items(bot).filter(i => new RegExp(kind).test(i.name));
   if (!list.length) return false;
   list.sort((a, b) => rank(b.name) - rank(a.name));
-  try {
-    await bot.equip(list[0], 'hand');
-    return true;
-  } catch { return false; }
+  try { await bot.equip(list[0], 'hand'); return true; } catch { return false; }
 }
 
-/** Tool almost broken? (durability < 15%) */
 function almostBroken(bot, kindRe) {
   try {
-    const list = items(bot).filter(i => kindRe.test(i.name));
-    for (const it of list) {
+    for (const it of items(bot).filter(i => kindRe.test(i.name))) {
       const max = it.maxDurability ?? it.durability ?? 0;
       const used = it.durabilityUsed ?? 0;
       if (max > 0 && (max - used) / max < 0.15) return true;
@@ -224,10 +261,6 @@ function almostBroken(bot, kindRe) {
   return false;
 }
 
-/**
- * If pickaxe/axe/sword is missing (broke), clear cooldown and craft the best available.
- * Returns true if it started a replace craft.
- */
 async function replaceBrokenTools(bot) {
   const planks = countRe(bot, /_planks$/);
   const sticks = count(bot, 'stick');
@@ -236,49 +269,31 @@ async function replaceBrokenTools(bot) {
   const anyPick = hasRe(bot, /pickaxe/);
   const anyAxe = hasRe(bot, /_axe$/);
   const anySword = hasRe(bot, /sword/);
-  const stonePick = hasRe(bot, /stone_pickaxe/);
   const ironPick = hasRe(bot, /iron_pickaxe/);
 
-  // Tool gone → allow craft again
-  if (!anyPick || !anyAxe || !anySword) {
-    clearToolCraftCooldown();
-  }
+  if (!anyPick || !anyAxe || !anySword) clearToolCraftCooldown();
 
-  // Priority: pickaxe first (needed for stone)
   if (!anyPick) {
     console.log('[PASSIVE] pickaxe BROKEN/missing → replace');
-    if (iron >= 3 && sticks >= 2) {
-      if (await craft(bot, 'iron_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
-    }
-    if (cobble >= 3 && sticks >= 2) {
-      if (await craft(bot, 'stone_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
-    }
-    if (planks >= 3 && sticks >= 2) {
-      if (await craft(bot, 'wooden_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
-    }
-    // No mats → gather wood first next ticks
+    if (iron >= 3 && sticks >= 2 && await craft(bot, 'iron_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
+    if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
+    if (planks >= 3 && sticks >= 2 && await craft(bot, 'wooden_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
     return false;
   }
-
-  // Spare if almost broken
   if (almostBroken(bot, /pickaxe/) && !ironPick) {
     if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_pickaxe', 1)) {
-      console.log('[PASSIVE] spare pickaxe (low durability)');
+      console.log('[PASSIVE] spare pickaxe');
       return true;
     }
   }
-
   if (!anyAxe) {
-    console.log('[PASSIVE] axe BROKEN/missing → replace');
     if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_axe', 1)) return true;
     if (planks >= 3 && sticks >= 2 && await craft(bot, 'wooden_axe', 1)) return true;
   }
-
   if (!anySword) {
     if (cobble >= 2 && sticks >= 1 && await craft(bot, 'stone_sword', 1)) return true;
     if (planks >= 2 && sticks >= 1 && await craft(bot, 'wooden_sword', 1)) return true;
   }
-
   return false;
 }
 
@@ -288,7 +303,6 @@ async function escapeHole(bot) {
     const head = bot.blockAt(p.floored().offset(0, 1, 0));
     const above = bot.blockAt(p.floored().offset(0, 2, 0));
     const ground = bot.blockAt(p.floored().offset(0, -1, 0));
-
     const headSolid = head && head.boundingBox === 'block';
     const aboveSolid = above && above.boundingBox === 'block';
     const inHole =
@@ -303,23 +317,17 @@ async function escapeHole(bot) {
           }
           return walls >= 3;
         })());
-
     if (!inHole && !headSolid) return false;
-
-    console.log('[PASSIVE] escape hole/1-high');
+    console.log('[PASSIVE] escape hole');
     if (headSolid) await dig(bot, head);
     if (aboveSolid) await dig(bot, above);
-
     for (const o of [[1,0],[-1,0],[0,1],[0,-1]]) {
       const side = bot.blockAt(p.floored().offset(o[0], 0, o[1]));
       const sideUp = bot.blockAt(p.floored().offset(o[0], 1, o[1]));
-      if (side && side.boundingBox === 'block') await dig(bot, side);
-      if (sideUp && sideUp.boundingBox === 'block') await dig(bot, sideUp);
+      if (side?.boundingBox === 'block') await dig(bot, side);
+      if (sideUp?.boundingBox === 'block') await dig(bot, sideUp);
     }
-
-    const scaffold = items(bot).find(i =>
-      /dirt|cobblestone|netherrack|planks|stone$|andesite|granite|diorite|tuff/.test(i.name)
-    );
+    const scaffold = items(bot).find(i => BUILD_RE.test(i.name));
     if (scaffold) {
       try {
         await bot.equip(scaffold, 'hand');
@@ -328,24 +336,121 @@ async function escapeHole(bot) {
         const under = bot.blockAt(bot.entity.position.offset(0, -1, 0));
         if (under) {
           await bot.lookAt(under.position.offset(0.5, 1, 0.5), true);
-          try {
-            await race(bot.placeBlock(under, new (require('vec3').Vec3)(0, 1, 0)), 2000);
-          } catch {}
+          try { await race(bot.placeBlock(under, new Vec3(0, 1, 0)), 2000); } catch {}
         }
         bot.setControlState('jump', false);
-      } catch {
-        bot.clearControlStates();
-      }
+      } catch { bot.clearControlStates(); }
     }
-
     bot.setControlState('forward', true);
     bot.setControlState('jump', true);
     await sleep(400);
     bot.clearControlStates();
     return true;
-  } catch {
-    return false;
+  } catch { return false; }
+}
+
+/**
+ * Real 5x5 starter house (floor + walls + roof + door gap + torch).
+ * Better than Altera Builder Bot's random mess.
+ */
+async function buildShelter(bot, agent) {
+  if (bot._dreamHomeBuilt || agent._dreamHomeBuilt) return false;
+
+  const buildItems = items(bot).filter(i => BUILD_RE.test(i.name));
+  const totalBlocks = buildItems.reduce((a, i) => a + i.count, 0);
+  if (totalBlocks < 40) return false; // need enough material
+
+  // Prefer flat ground
+  const origin = bot.entity.position.floored();
+  const ground = bot.blockAt(origin.offset(0, -1, 0));
+  if (!ground || ground.boundingBox !== 'block') return false;
+
+  console.log('[PASSIVE] building HOUSE 5x5');
+  const size = 5; // 0..4 inclusive = 5 blocks
+  let placed = 0;
+
+  // Floor
+  for (let x = 0; x < size; x++) {
+    for (let z = 0; z < size; z++) {
+      const pos = origin.offset(x, -1, z);
+      const b = bot.blockAt(pos);
+      if (b && b.name !== 'air' && b.boundingBox === 'block') continue;
+      const below = bot.blockAt(pos.offset(0, -1, 0));
+      const ref = below && below.boundingBox === 'block' ? below : ground;
+      // walk near
+      const d = bot.entity.position.distanceTo(pos);
+      if (d > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
+      if (await placeAt(bot, ref, new Vec3(0, 1, 0))) placed++;
+      await sleep(50);
+    }
   }
+
+  // Walls height 2 (y=0 and y=1), door at (2,0,0) and (2,1,0)
+  for (let y = 0; y < 2; y++) {
+    for (let x = 0; x < size; x++) {
+      for (const z of [0, size - 1]) {
+        if (z === 0 && x === 2) continue; // door
+        const pos = origin.offset(x, y, z);
+        const existing = bot.blockAt(pos);
+        if (existing && existing.boundingBox === 'block') continue;
+        const ref = bot.blockAt(pos.offset(0, -1, 0));
+        if (!ref || ref.boundingBox !== 'block') continue;
+        if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
+        if (await placeAt(bot, ref, new Vec3(0, 1, 0))) placed++;
+        await sleep(40);
+      }
+    }
+    for (let z = 1; z < size - 1; z++) {
+      for (const x of [0, size - 1]) {
+        const pos = origin.offset(x, y, z);
+        const existing = bot.blockAt(pos);
+        if (existing && existing.boundingBox === 'block') continue;
+        const ref = bot.blockAt(pos.offset(0, -1, 0));
+        if (!ref || ref.boundingBox !== 'block') continue;
+        if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
+        if (await placeAt(bot, ref, new Vec3(0, 1, 0))) placed++;
+        await sleep(40);
+      }
+    }
+  }
+
+  // Roof at y=2
+  for (let x = 0; x < size; x++) {
+    for (let z = 0; z < size; z++) {
+      const pos = origin.offset(x, 2, z);
+      const existing = bot.blockAt(pos);
+      if (existing && existing.boundingBox === 'block') continue;
+      const ref = bot.blockAt(pos.offset(0, -1, 0));
+      if (!ref || ref.boundingBox !== 'block') continue;
+      if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y + 1, pos.z, 2);
+      if (await placeAt(bot, ref, new Vec3(0, 1, 0))) placed++;
+      await sleep(40);
+    }
+  }
+
+  // Torch inside
+  if (has(bot, 'torch') || count(bot, 'torch') > 0) {
+    try {
+      const torch = items(bot).find(i => i.name === 'torch');
+      if (torch) {
+        await bot.equip(torch, 'hand');
+        const wall = bot.blockAt(origin.offset(1, 1, 1));
+        if (wall) {
+          await bot.lookAt(wall.position.offset(0.5, 0.5, 0.5), true);
+          try { await race(bot.placeBlock(wall, new Vec3(0, 0, 1)), 2000); } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  // Remember home (center of floor)
+  const home = origin.offset(2, 0, 2);
+  bot._dreamHome = home;
+  bot._dreamHomeBuilt = true;
+  agent._dreamHomeBuilt = true;
+  agent._dreamHome = home;
+  console.log('[PASSIVE] HOUSE DONE placed~', placed, 'home', home.x, home.y, home.z);
+  return true;
 }
 
 function enableAutoJump(bot) {
@@ -356,28 +461,21 @@ function enableAutoJump(bot) {
       if (!bot.entity || bot._dreamPvpActive) return;
       if (bot.targetDigBlock) return;
       if (!bot.controlState.forward && !bot.pathfinder?.isMoving?.()) return;
-
       const yaw = bot.entity.yaw;
       const dx = -Math.sin(yaw);
       const dz = -Math.cos(yaw);
       const front = bot.blockAt(bot.entity.position.offset(dx * 0.8, 0, dz * 0.8));
       const frontUp = bot.blockAt(bot.entity.position.offset(dx * 0.8, 1, dz * 0.8));
-      const step =
-        front && front.boundingBox === 'block' &&
-        (!frontUp || frontUp.boundingBox !== 'block');
-
+      const step = front && front.boundingBox === 'block' && (!frontUp || frontUp.boundingBox !== 'block');
       if (step && bot.entity.onGround) {
         bot.setControlState('jump', true);
-        setTimeout(() => {
-          try { bot.setControlState('jump', false); } catch {}
-        }, 120);
+        setTimeout(() => { try { bot.setControlState('jump', false); } catch {} }, 120);
       }
     } catch {}
   });
   console.log('[PASSIVE] auto-jump ON');
 }
 
-/** Watch inventory: tool disappeared → log + clear cooldown */
 function watchToolBreak(bot) {
   if (bot._dreamToolWatch) return;
   bot._dreamToolWatch = true;
@@ -400,6 +498,7 @@ export async function runPassiveSkillTick(agent) {
   if (!bot?.entity || bot._dreamPvpActive) return;
 
   if (await escapeHole(bot)) return;
+  if (await bridgeGap(bot)) return;
 
   const logs = countRe(bot, /_log$/);
   const planks = countRe(bot, /_planks$/);
@@ -414,18 +513,18 @@ export async function runPassiveSkillTick(agent) {
   const rawIron = count(bot, 'raw_iron');
   const coal = count(bot, 'coal') + count(bot, 'charcoal');
   const hasFurnace = has(bot, 'furnace');
+  const buildCount = items(bot).filter(i => BUILD_RE.test(i.name)).reduce((a, i) => a + i.count, 0);
 
   if (await eatIfNeeded(bot)) return;
-
-  // HIGH PRIORITY: replace broken tools before anything else
   if (await replaceBrokenTools(bot)) return;
 
-  if (logs < 8) {
+  // Wood
+  if (logs < 10) {
     console.log('[PASSIVE] need wood');
     if (await collect(bot, WOOD, 3, 40)) return;
   }
 
-  if (logs >= 1 && planks < 20) {
+  if (logs >= 1 && planks < 32) {
     const logItem = items(bot).find(i => /_log$/.test(i.name));
     if (logItem) {
       const recipe = logItem.name.replace('_log', '_planks');
@@ -436,33 +535,24 @@ export async function runPassiveSkillTick(agent) {
   if (!hasTableItem && !tableNear && planks >= 4) {
     if (await craft(bot, 'crafting_table', 1)) return;
   }
-  if (hasTableItem && !tableNear) {
-    await ensureTableNearby(bot);
-  }
+  if (hasTableItem && !tableNear) await ensureTableNearby(bot);
 
-  if (sticks < 12 && planks >= 2) {
+  if (sticks < 16 && planks >= 2) {
     if (await craft(bot, 'stick', 4)) return;
   }
 
-  // Normal tool progression (only if still missing after replaceBrokenTools)
   if (planks >= 3 && sticks >= 2 && !anyPick && canTryCraft('wooden_pickaxe')) {
-    if (await craft(bot, 'wooden_pickaxe', 1)) {
-      await equipBest(bot, 'pickaxe');
-      return;
-    }
+    if (await craft(bot, 'wooden_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
 
-  if (anyPick && cobble < 24) {
+  if (anyPick && cobble < 32) {
     console.log('[PASSIVE] mine stone');
     await equipBest(bot, 'pickaxe');
-    if (await collect(bot, ['stone', 'cobblestone', 'deepslate'], 5, 28)) return;
+    if (await collect(bot, ['stone', 'cobblestone', 'deepslate'], 6, 28)) return;
   }
 
   if (cobble >= 3 && sticks >= 2 && !stonePick && !ironPick && canTryCraft('stone_pickaxe')) {
-    if (await craft(bot, 'stone_pickaxe', 1)) {
-      await equipBest(bot, 'pickaxe');
-      return;
-    }
+    if (await craft(bot, 'stone_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
 
   if (cobble >= 8 && !hasFurnace && canTryCraft('furnace')) {
@@ -470,26 +560,39 @@ export async function runPassiveSkillTick(agent) {
   }
 
   if (stonePick || ironPick) {
-    if (coal < 6 && await collect(bot, ['coal_ore', 'deepslate_coal_ore'], 2, 24)) return;
-    if (rawIron + iron < 5 && await collect(bot, ['iron_ore', 'deepslate_iron_ore'], 2, 24)) return;
+    if (coal < 8 && await collect(bot, ['coal_ore', 'deepslate_coal_ore'], 2, 24)) return;
+    if (rawIron + iron < 6 && await collect(bot, ['iron_ore', 'deepslate_iron_ore'], 2, 24)) return;
   }
 
   if (iron >= 3 && sticks >= 2 && !ironPick && canTryCraft('iron_pickaxe')) {
-    if (await craft(bot, 'iron_pickaxe', 1)) {
-      await equipBest(bot, 'pickaxe');
-      return;
-    }
+    if (await craft(bot, 'iron_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
 
-  if (coal >= 1 && sticks >= 1 && count(bot, 'torch') < 12 && canTryCraft('torch')) {
+  if (coal >= 1 && sticks >= 1 && count(bot, 'torch') < 16 && canTryCraft('torch')) {
     if (await craft(bot, 'torch', 4)) return;
+  }
+
+  // HOUSE — after tools + materials (better than Altera dumb house)
+  if (!bot._dreamHomeBuilt && buildCount >= 40 && anyPick) {
+    if (await buildShelter(bot, agent)) return;
+  }
+
+  // Night-ish or low health → go home if known
+  const time = bot.time?.timeOfDay ?? 0;
+  if (bot._dreamHome && (time > 12000 || bot.health < 10)) {
+    const h = bot._dreamHome;
+    console.log('[PASSIVE] return home');
+    await goto(bot, h.x, h.y, h.z, 2);
+    return;
   }
 
   console.log('[PASSIVE] explore');
   const yaw = bot.entity.yaw + (Math.random() > 0.5 ? 0.7 : -0.7);
   try { await bot.look(yaw, 0, true); } catch {}
-  const tx = bot.entity.position.x - Math.sin(yaw) * 8;
-  const tz = bot.entity.position.z - Math.cos(yaw) * 8;
+  // try bridge if gap ahead before pathing
+  await bridgeGap(bot);
+  const tx = bot.entity.position.x - Math.sin(yaw) * 10;
+  const tz = bot.entity.position.z - Math.cos(yaw) * 10;
   await goto(bot, tx, bot.entity.position.y, tz, 2);
 }
 
@@ -516,7 +619,6 @@ export function startPassiveSkills(agent) {
       if (agent._passiveRunning) return;
       if (agent.bot._dreamPvpActive) return;
       if (agent.bot.targetDigBlock) return;
-
       agent._passiveRunning = true;
       await runPassiveSkillTick(agent);
     } catch (e) {
@@ -528,6 +630,5 @@ export function startPassiveSkills(agent) {
 
   setTimeout(tick, 2500);
   setInterval(tick, 6000);
-
-  console.log('[PASSIVE] BRAIN ON — tool break replace + fail cooldown + hole + auto-jump');
+  console.log('[PASSIVE] BRAIN ON — house + bridge + tool break + auto-jump (above Builder Bot)');
 }
