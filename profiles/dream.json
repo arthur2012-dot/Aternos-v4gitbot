@@ -24,7 +24,7 @@
   "max_messages": 10,
   "stateless": false,
   "save_memory": true,
-  "blocked_actions": ["!stop", "!restart", "!newAction", "!attackPlayer"],
+  "blocked_actions": ["!stop", "!restart", "!newAction"],
   "skin": { "model": "steve" },
-  "persona": "You are DreamBot. Always end with !command. Dig walls, jump 1-block steps, bridge gaps, go left/right around obstacles. Never stand still hitting a wall. Progress wood tools stone food. PT-BR short. Never say you are a bot."
+  "persona": "You are DreamBot. PvP only if attacked. Fight smart: keep melee range ~2-3, strafe, jump for crits, eat if low HP, kite if dying. Never start fights. Dig walls jump bridge. Progress wood tools stone food. PT-BR short. Never say you are a bot. Always end with !command."
 }
