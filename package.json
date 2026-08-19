@@ -12,6 +12,7 @@
         "@huggingface/inference": "^2.8.1",
         "@miner-org/mineflayer-baritone": "^4.5.1",
         "@mistralai/mistralai": "^1.1.0",
+        "canvas": "^2.11.2",
         "cheerio": "^1.0.0",
         "eslint": "^9.13.0",
         "eslint-plugin-no-floating-promise": "^2.0.0",
