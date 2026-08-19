@@ -27,8 +27,8 @@ if (!existsSync(agentPath)) process.exit(0);
 
 let agent = readFileSync(agentPath, 'utf8');
 
-// Suppress auto-prompt stop spam in chat
-if (!agent.includes('[DreamBot] suppressed')) {
+// Suppress auto-prompt stop spam
+if (!agent.includes('[DreamBot] suppressed') && agent.includes('async openChat')) {
   agent = agent.replace(
     /async openChat\(message\) \{/,
     `async openChat(message) {
@@ -38,17 +38,22 @@ if (!agent.includes('[DreamBot] suppressed')) {
             console.warn('[DreamBot] suppressed stop-msg');
             return;
         }
-        if (/groq|rate.?limit|api key|exiting|hello world|PathStopped|replaceAll|model_not_found/i.test(__m)) {
+        if (/groq|rate.?limit|api key|exiting|hello world|PathStopped|model_not_found/i.test(__m)) {
             console.warn('[DreamBot] suppressed:', __m.slice(0, 40));
             return;
         }`
   );
 }
 
-// Force inject full passive stack once on spawn
+// Remove dangerous periodic anti-AFK nudge if we injected one before
+agent = agent.replace(
+  /setInterval\(\(\) => \{[\s\S]*?spd < 0\.02[\s\S]*?\}, 10000\);/g,
+  '/* removed random anti-AFK nudge — was killing bot */'
+);
+
 if (!agent.includes('[DreamBot] FULL STACK')) {
   const block = `
-            // [DreamBot] FULL STACK — passive first
+            // [DreamBot] FULL STACK — passive first, safe anti-freeze
             try {
                 const { startPassiveSkills } = await import('./passive-skills.js');
                 startPassiveSkills(this);
@@ -74,41 +79,14 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
                 const { startTaskGuard } = await import('./task-guard.js');
                 startTaskGuard(this);
             } catch (e) { console.warn('[DreamBot] task-guard', e.message); }
-            // Keep body moving even if LLM dies
-            setInterval(() => {
-                try {
-                    if (!this.bot?.entity) return;
-                    if (this.bot._dreamPvpActive) return;
-                    if (this.actions?.executing) return;
-                    if (this.bot.pathfinder?.isMoving?.()) return;
-                    const v = this.bot.entity.velocity;
-                    const spd = Math.sqrt(v.x*v.x + v.z*v.z);
-                    if (spd < 0.02) {
-                        this.bot.setControlState('forward', true);
-                        this.bot.setControlState('sprint', true);
-                        this.bot.setControlState('jump', true);
-                        setTimeout(() => {
-                            try {
-                                this.bot.clearControlStates();
-                                this.bot.look(this.bot.entity.yaw + 1, 0);
-                            } catch {}
-                        }, 700);
-                    }
-                } catch {}
-            }, 10000);
 `;
   if (agent.includes("this.bot.once('spawn'")) {
     agent = agent.replace(
       /this\.bot\.once\('spawn', async \(\) => \{/,
       `this.bot.once('spawn', async () => {${block}`
     );
-    writeFileSync(agentPath, agent);
-    console.log('[post-wire] FULL STACK injected');
-  } else {
-    writeFileSync(agentPath, agent);
-    console.warn('[post-wire] no spawn hook found');
   }
-} else {
-  writeFileSync(agentPath, agent);
-  console.log('[post-wire] stack already present');
 }
+
+writeFileSync(agentPath, agent);
+console.log('[post-wire] passive-first + safe anti-freeze');

@@ -1,6 +1,7 @@
 /**
- * Anti-freeze — only when truly idle (NOT while pathing, digging, or acting).
- * Players nearby must NOT cancel tasks.
+ * Anti-freeze SAFE — only unstuck when truly trapped.
+ * NOT anti-AFK. Does NOT random-sprint into water/lava/cliffs.
+ * Purposeful movement = passive-skills, not this module.
  */
 export function startAntiFreeze(agent) {
   const bot = agent.bot;
@@ -16,58 +17,82 @@ export function startAntiFreeze(agent) {
     try {
       if (bot._dreamPvpActive) return true;
       if (agent.actions?.executing) return true;
+      if (agent._passiveRunning) return true;
       if (bot.pathfinder?.isMoving?.()) return true;
       if (bot.targetDigBlock) return true;
-      if (bot._navBusy) return true;
-      if (agent._dreamLock && Date.now() < (agent._dreamLockUntil || 0)) return true;
     } catch {}
     return false;
   };
 
-  const clearAll = () => {
+  const dangerAhead = () => {
     try {
-      bot.clearControlStates();
-    } catch {
-      try {
-        for (const c of ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak']) {
-          bot.setControlState(c, false);
-        }
-      } catch {}
-    }
+      const pos = bot.entity.position;
+      const yaw = bot.entity.yaw;
+      const fx = -Math.sin(yaw);
+      const fz = -Math.cos(yaw);
+      const feet = bot.blockAt(pos.offset(fx, 0, fz));
+      const down = bot.blockAt(pos.offset(fx, -1, fz));
+      const down2 = bot.blockAt(pos.offset(fx, -2, fz));
+      const n = (b) => (b?.name || '');
+      if (/lava|fire|magma/.test(n(feet)) || /lava|fire|magma/.test(n(down))) return true;
+      // deep drop
+      if ((!down || n(down) === 'air') && (!down2 || n(down2) === 'air')) return true;
+      if (/water/.test(n(feet)) && /water/.test(n(down))) return true;
+    } catch {}
+    return false;
   };
 
-  const forceMove = async (reason) => {
+  const safeUnstuck = async () => {
     if (unlocking || !bot.entity || isBusy()) return;
     unlocking = true;
-    console.log('[ANTI-FREEZE]', reason);
+    console.log('[ANTI-FREEZE] safe unstuck (not anti-AFK)');
     try {
-      try { bot.ashfinder?.stop?.(); } catch {}
-      try {
-        bot.pathfinder?.setGoal?.(null);
-        bot.pathfinder?.stop?.();
-      } catch {}
-      clearAll();
+      // 1) Prefer dig block trapping head/feet
+      const pos = bot.entity.position;
+      const yaw = bot.entity.yaw;
+      const fx = -Math.sin(yaw);
+      const fz = -Math.cos(yaw);
+      const candidates = [
+        bot.blockAt(pos.offset(0, 1, 0)),
+        bot.blockAt(pos.offset(fx, 1, fz)),
+        bot.blockAt(pos.offset(fx, 0, fz)),
+        bot.blockAt(pos.offset(0, 2, 0)),
+      ];
+      for (const b of candidates) {
+        if (!b || b.boundingBox !== 'block') continue;
+        if (/bedrock|barrier|obsidian/.test(b.name)) continue;
+        try {
+          await Promise.race([
+            bot.dig(b),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 3500)),
+          ]);
+          console.log('[ANTI-FREEZE] dug', b.name);
+          stillCount = 0;
+          return;
+        } catch {
+          try { bot.stopDigging(); } catch {}
+        }
+      }
 
-      const yaw = bot.entity.yaw + (Math.random() > 0.5 ? 1.0 : -1.0);
+      // 2) Turn around only (no long sprint)
+      const newYaw = yaw + Math.PI; // 180°
       try {
-        await bot.look(yaw, 0, true);
+        await bot.look(newYaw, 0, true);
       } catch {}
 
-      bot.setControlState('jump', true);
-      bot.setControlState('sprint', true);
+      if (dangerAhead()) {
+        // step carefully one block, no jump into void
+        bot.setControlState('sneak', true);
+        bot.setControlState('back', true);
+        await new Promise(r => setTimeout(r, 400));
+        bot.clearControlStates();
+        return;
+      }
+
+      // 3) Short hop forward only if safe
       bot.setControlState('forward', true);
       await new Promise(r => setTimeout(r, 350));
-      bot.setControlState('jump', false);
-      await new Promise(r => setTimeout(r, 500));
-      clearAll();
-
-      try {
-        const { goals } = require('mineflayer-pathfinder');
-        const p = bot.entity.position;
-        bot.pathfinder.setGoal(
-          new goals.GoalNear(p.x + Math.sin(yaw) * 5, p.y, p.z + Math.cos(yaw) * 5, 1)
-        );
-      } catch {}
+      bot.clearControlStates();
     } catch (e) {
       console.warn('[ANTI-FREEZE]', e.message);
     } finally {
@@ -76,10 +101,10 @@ export function startAntiFreeze(agent) {
     }
   };
 
+  // Check every 1.5s — need ~9s truly still before acting
   setInterval(() => {
     try {
       if (!bot.entity) return;
-      // Critical: do not interrupt real work
       if (isBusy()) {
         stillCount = 0;
         lastX = bot.entity.position.x;
@@ -103,13 +128,14 @@ export function startAntiFreeze(agent) {
       lastX = x;
       lastZ = z;
 
-      if (dx < 0.06 && dz < 0.06 && speed < 0.04) stillCount++;
+      if (dx < 0.05 && dz < 0.05 && speed < 0.03) stillCount++;
       else stillCount = 0;
 
-      // ~3.5s truly idle
-      if (stillCount >= 5) forceMove('idle statue');
+      // ~9 seconds frozen (6 * 1.5s)
+      if (stillCount >= 6) safeUnstuck();
     } catch {}
-  }, 700);
+  }, 1500);
 
-  console.log('[DreamBot] anti-freeze ON (skips while pathing/acting)');
+  // NO periodic random nudge — that was the anti-AFK that almost killed him
+  console.log('[DreamBot] anti-freeze SAFE (no random anti-AFK)');
 }
