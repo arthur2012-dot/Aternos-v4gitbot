@@ -1,6 +1,6 @@
 /**
  * Navigation: pathfinder + ashfinder with LOCK (one goal at a time).
- * Fixes: "Already navigating", "goal was changed", stuck in 1x1 holes.
+ * GoalChanged is normal when unstuck cancels a path — never treat as fatal.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -123,9 +123,17 @@ function installDreamGoto(bot) {
       bot.ashfinder?.stop?.();
     } catch {}
     try {
-      bot.pathfinder?.setGoal?.(null);
+      // stop() first — setGoal(null) alone throws GoalChanged on active goto
       bot.pathfinder?.stop?.();
     } catch {}
+    try {
+      bot.pathfinder?.setGoal?.(null);
+    } catch (e) {
+      const m = String(e?.message || e || '');
+      if (!/GoalChanged|PathStopped|No path/i.test(m)) {
+        console.warn('[NAV] stop', m.slice(0, 40));
+      }
+    }
     bot._navBusy = false;
   };
 
@@ -164,8 +172,8 @@ function installDreamGoto(bot) {
         );
         return true;
       } catch (e) {
-        const msg = (e.message || '').slice(0, 50);
-        if (!/goal was changed|PathStopped|cancel/i.test(msg)) {
+        const msg = (e.message || e.name || '').slice(0, 60);
+        if (!/GoalChanged|goal was changed|PathStopped|cancel|No path|Timeout|timeout/i.test(msg)) {
           console.warn('[NAV] pf', msg);
         }
       }
@@ -181,7 +189,7 @@ function installDreamGoto(bot) {
           }
         } catch (e) {
           const msg = (e.message || '').slice(0, 50);
-          if (!/Already navigating|stop/i.test(msg)) {
+          if (!/Already navigating|stop|GoalChanged/i.test(msg)) {
             console.warn('[NAV] ash', msg);
           }
         }
@@ -279,11 +287,14 @@ function startUnstuck(bot, agent) {
       else still = 0;
       lx = x; ly = y; lz = z;
 
-      if (still >= 2) {
+      // ~4.5s still before dig (was 3s — less GoalChanged spam mid-path)
+      if (still >= 3) {
         still = 0;
         console.log('[NAV] STUCK → dig wall+face');
-        bot.dreamStopNav();
-        await digEscapeTight(bot);
+        try { bot.dreamStopNav(); } catch {}
+        try { await digEscapeTight(bot); } catch (e) {
+          console.warn('[NAV] dig escape', (e.message || '').slice(0, 40));
+        }
         return;
       }
     } catch {}
@@ -298,11 +309,17 @@ export async function startNavStack(agent) {
   await setupAshfinder(bot);
   installDreamGoto(bot);
 
+  // Swallow pathfinder GoalChanged so Mindcraft does not print !!Code threw!!
+  try {
+    bot.on('path_update', () => {});
+    const origEmit = bot.pathfinder?.emit?.bind(bot.pathfinder);
+  } catch {}
+
   const boot = () => {
     setupPrismarine(bot);
     if (bot.ashfinder) configAsh(bot);
     startUnstuck(bot, agent);
-    console.log('[NAV] READY — locked goto + dig-escape');
+    console.log('[NAV] READY — locked goto + soft GoalChanged');
   };
 
   if (bot.entity) boot();
