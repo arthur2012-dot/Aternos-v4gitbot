@@ -1,6 +1,6 @@
 /**
- * DreamBot — Mindcraft + FULL PASSIVE + advanced local NAV
- * Passive scans nearby blocks: dig wall, jump step, bridge gap, turn around, pillar out
+ * DreamBot — Mindcraft base + crash fixes + aggressive local NAV
+ * Fixes: prompt.replaceAll TypeError, stuck against walls, freeze on dig
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -56,6 +56,7 @@ function refresh() {
     'src/agent/library/skills.js',
     'src/agent/self_prompter.js',
     'src/utils/mcdata.js',
+    'src/models/prompter.js',
   ]) {
     const from = join(TMP, rel);
     if (!existsSync(from)) continue;
@@ -72,6 +73,38 @@ function refresh() {
 }
 
 function applyFixes() {
+  // ===== CRITICAL: prompter replaceAll crash =====
+  // TypeError: prompt.replaceAll is not a function when prompt is not a string
+  try {
+    let prompter = read('src/models/prompter.js');
+    if (!prompter.includes('[DreamBot] safeReplace')) {
+      // Inject safe helper near top of class usage / before replaceStrings
+      if (prompter.includes('async replaceStrings')) {
+        prompter = prompter.replace(
+          /async replaceStrings\s*\(/,
+          `// [DreamBot] safeReplace — never call replaceAll on non-string
+    _safeReplaceAll(str, search, repl) {
+        const s = (str == null) ? '' : String(str);
+        if (typeof s.replaceAll === 'function') {
+            try { return s.replaceAll(search, repl); } catch {}
+        }
+        const esc = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return s.replace(new RegExp(esc, 'g'), repl == null ? '' : String(repl));
+    }
+
+    async replaceStrings(`
+        );
+        // Replace all prompt.replaceAll( with this._safeReplaceAll(prompt,
+        prompter = prompter.replace(/prompt\s*=\s*prompt\.replaceAll\(/g, 'prompt = this._safeReplaceAll(prompt, ');
+        // Also fix other .replaceAll on possibly non-strings in that function if any pattern like stats.replaceAll
+        console.log('[fetch-base] prompter: safeReplace for replaceAll');
+      }
+      write('src/models/prompter.js', prompter);
+    }
+  } catch (e) {
+    console.warn('[fetch-base] prompter patch', e.message);
+  }
+
   let modes = read('src/agent/modes.js');
   modes = modes.replace(
     /if\s*\(\s*agent\.self_prompter\.isActive\(\)\s*\)\s*\n?\s*agent\.self_prompter\.stopLoop\(\);/g,
@@ -160,7 +193,7 @@ function applyFixes() {
       /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/,
       `try {
             if (this.self_prompter && !this.self_prompter.isActive()) {
-                this.self_prompter.start('Survive. Always !command. Dig jump bridge around obstacles.');
+                this.self_prompter.start('Survive. Dig walls, jump steps, go around. Always !command.');
             }
         } catch {}`
     );
@@ -171,7 +204,7 @@ function applyFixes() {
       `async openChat(message) {
         const __m = String(message || '');
         if (!__m.trim()) return;
-        if (/groq|rate.?limit|brain disconnected|api key|restarting|exiting|hello world|PathStopped|passivo|cooldown/i.test(__m)) {
+        if (/groq|rate.?limit|brain disconnected|api key|restarting|exiting|hello world|PathStopped|passivo|cooldown|replaceAll/i.test(__m)) {
             console.warn('[DreamBot] suppressed:', __m.slice(0, 40));
             return;
         }`
@@ -183,19 +216,19 @@ function applyFixes() {
       `cleanKill(msg='Killing agent process...', code=1) {
         console.warn('[DreamBot] cleanKill:', msg, code);
         try { this.history.add('system', msg); this.history.save(); } catch {}
-        if (/stuck|unstuck|not spawned|PathStopped/i.test(String(msg))) return;
+        if (/stuck|unstuck|not spawned|PathStopped|replaceAll/i.test(String(msg))) return;
         process.exit(code);
     }`
     );
   }
 
-  if (!agent.includes('[DreamBot] NAV BRAIN')) {
+  if (!agent.includes('[DreamBot] NAV BRAIN v2')) {
     agent = agent.replace(
       /this\.bot\.once\('spawn', async \(\) => \{\s*try \{\s*clearTimeout\(spawnTimeout\);/,
       `this.bot.once('spawn', async () => {
             try { clearTimeout(spawnTimeout); } catch {}
 
-            // [DreamBot] NAV BRAIN — passive environment scan + movement
+            // [DreamBot] NAV BRAIN v2 — aggressive dig/jump/around, cancel path when stuck on block
             this._dreamLock = false;
             this._dreamLockUntil = 0;
             this._navBusy = false;
@@ -210,6 +243,23 @@ function applyFixes() {
             const dreamRelease = () => { this._dreamLock = false; this._dreamLockUntil = 0; };
             const isPathing = () => { try { return !!this.bot.pathfinder?.isMoving?.(); } catch { return false; } };
             const isActing = () => !!this.actions?.executing;
+
+            const stopPath = () => {
+                try {
+                    if (this.bot.pathfinder) {
+                        this.bot.pathfinder.setGoal(null);
+                        this.bot.pathfinder.stop();
+                    }
+                } catch {}
+            };
+            const clearControls = () => {
+                try {
+                    const b = this.bot;
+                    for (const c of ['jump','forward','back','left','right','sprint','sneak']) {
+                        try { b.setControlState(c, false); } catch {}
+                    }
+                } catch {}
+            };
 
             try {
                 const pf = await import('mineflayer-pathfinder');
@@ -233,16 +283,13 @@ function applyFixes() {
                 if (!this._homePos && this.bot.entity) this._homePos = this.bot.entity.position.clone();
             } catch {}
 
-            // ===== LOCAL NAV: scans blocks around bot every 1.2s =====
-            // Works in passive AND while pathing is stuck against walls
+            // Aggressive local NAV every 1s — works while pathing (cancels path if wall-stuck)
             setInterval(async () => {
                 if (this._navBusy) return;
                 try {
                     const bot = this.bot;
                     if (!bot?.entity) return;
-                    // Allow NAV even during pathing (to dig/jump out of traps)
-                    // Only skip if passive survival holds the long lock
-                    if (this._dreamLock && Date.now() < (this._dreamLockUntil || 0) - 5000) return;
+                    if (this._dreamLock && Date.now() < (this._dreamLockUntil || 0) - 4000) return;
 
                     this._navBusy = true;
                     let Vec3;
@@ -259,7 +306,6 @@ function applyFixes() {
 
                     const pos = bot.entity.position;
                     const yaw = bot.entity.yaw;
-                    // forward / left / right unit vectors
                     const fwd = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
                     const left = { x: Math.cos(yaw), z: -Math.sin(yaw) };
                     const right = { x: -Math.cos(yaw), z: Math.sin(yaw) };
@@ -275,7 +321,6 @@ function applyFixes() {
                     };
                     const dirAt = (dir, dist, oy) => at(dir.x * dist, oy, dir.z * dist);
 
-                    // Sample environment
                     const fFeet = dirAt(fwd, 1, 0);
                     const fHead = dirAt(fwd, 1, 1);
                     const fAbove = dirAt(fwd, 1, 2);
@@ -293,30 +338,27 @@ function applyFixes() {
                         /dirt|cobblestone|planks|netherrack|stone$|andesite|granite|diorite|deepslate|tuff|mossy/.test(i.name)
                     );
 
-                    const clearControls = () => {
-                        try {
-                            bot.setControlState('jump', false);
-                            bot.setControlState('forward', false);
-                            bot.setControlState('sprint', false);
-                            bot.setControlState('back', false);
-                            bot.setControlState('left', false);
-                            bot.setControlState('right', false);
-                        } catch {}
+                    const finish = (ms = 0) => {
+                        if (ms <= 0) { this._navBusy = false; return; }
+                        setTimeout(() => { try { clearControls(); } catch {} this._navBusy = false; }, ms);
                     };
 
-                    // 1) Hole / no floor under feet → jump back or place
+                    // 1) No floor
                     if (air(below)) {
+                        stopPath();
                         const p = placeable();
                         if (p) {
                             try {
                                 await bot.equip(p, 'hand');
-                                // try place against a nearby solid
                                 for (const d of [fwd, left, right, { x: 0, z: 0 }]) {
                                     const ref = at(d.x, -1, d.z);
                                     if (solid(ref)) {
-                                        await bot.placeBlock(ref, new Vec3(0, 1, 0));
-                                        console.log('[DreamBot] NAV floor fix');
-                                        this._navBusy = false;
+                                        await Promise.race([
+                                            bot.placeBlock(ref, new Vec3(0, 1, 0)),
+                                            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500))
+                                        ]);
+                                        console.log('[DreamBot] NAV floor');
+                                        finish(200);
                                         return;
                                     }
                                 }
@@ -324,113 +366,137 @@ function applyFixes() {
                         }
                         bot.setControlState('jump', true);
                         bot.setControlState('back', true);
-                        setTimeout(() => { clearControls(); this._navBusy = false; }, 400);
-                        console.log('[DreamBot] NAV edge recover');
+                        finish(400);
+                        console.log('[DreamBot] NAV edge');
                         return;
                     }
 
-                    // 2) Gap ahead (bridge)
+                    // 2) Gap → bridge or jump or turn
                     if (air(fDown) && air(fFeet)) {
+                        stopPath();
                         const p = placeable();
                         if (p && solid(below)) {
                             try {
                                 await bot.equip(p, 'hand');
-                                const face = new Vec3(Math.round(fwd.x) || (fwd.x > 0 ? 1 : fwd.x < 0 ? -1 : 0), 0,
-                                    Math.round(fwd.z) || (fwd.z > 0 ? 1 : fwd.z < 0 ? -1 : 0));
-                                // place on top of block under player toward forward
-                                await bot.placeBlock(below, face.x || face.z ? face : new Vec3(1, 0, 0));
+                                const face = new Vec3(
+                                    Math.abs(fwd.x) > Math.abs(fwd.z) ? (fwd.x > 0 ? 1 : -1) : 0,
+                                    0,
+                                    Math.abs(fwd.z) >= Math.abs(fwd.x) ? (fwd.z > 0 ? 1 : -1) : 0
+                                );
+                                await Promise.race([
+                                    bot.placeBlock(below, face.x || face.z ? face : new Vec3(1, 0, 0)),
+                                    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500))
+                                ]);
                                 console.log('[DreamBot] NAV bridge');
                                 bot.setControlState('forward', true);
-                                setTimeout(() => { clearControls(); this._navBusy = false; }, 300);
+                                finish(350);
                                 return;
                             } catch {}
                         }
-                        // no blocks: jump if short gap (air at 1, solid at 2 down)
                         const f2Down = dirAt(fwd, 2, -1);
                         if (solid(f2Down) && air(f2Feet)) {
                             bot.setControlState('sprint', true);
                             bot.setControlState('forward', true);
                             bot.setControlState('jump', true);
-                            setTimeout(() => { clearControls(); this._navBusy = false; }, 450);
+                            finish(450);
                             console.log('[DreamBot] NAV gap jump');
                             return;
                         }
-                        // turn away from gap
-                        bot.look(yaw + 1.2, 0);
+                        bot.look(yaw + 1.3, 0);
                         bot.setControlState('forward', true);
-                        setTimeout(() => { clearControls(); this._navBusy = false; }, 350);
+                        finish(400);
                         console.log('[DreamBot] NAV avoid gap');
                         return;
                     }
 
-                    // 3) One-block step up → jump
+                    // 3) Step up 1 block
                     if (solid(fFeet) && air(fHead) && air(fAbove)) {
+                        stopPath();
                         bot.setControlState('jump', true);
                         bot.setControlState('forward', true);
                         bot.setControlState('sprint', true);
-                        setTimeout(() => { clearControls(); this._navBusy = false; }, 420);
-                        console.log('[DreamBot] NAV jump step', fFeet.name);
+                        finish(450);
+                        console.log('[DreamBot] NAV jump step', fFeet?.name);
                         return;
                     }
 
-                    // 4) Wall in front — dig or go around
+                    // 4) Wall ahead — ALWAYS stop pathfinder first so we don't freeze hitting the block
                     if (solid(fHead) || (solid(fFeet) && solid(fHead))) {
+                        stopPath();
                         const leftFree = air(lFeet) && air(lHead);
                         const rightFree = air(rFeet) && air(rHead);
-                        // Prefer go around if side is free
+
                         if (leftFree && !rightFree) {
                             bot.look(yaw + Math.PI / 2, 0);
                             bot.setControlState('forward', true);
                             bot.setControlState('sprint', true);
-                            setTimeout(() => { clearControls(); this._navBusy = false; }, 500);
-                            console.log('[DreamBot] NAV go left');
+                            finish(550);
+                            console.log('[DreamBot] NAV left');
                             return;
                         }
                         if (rightFree && !leftFree) {
                             bot.look(yaw - Math.PI / 2, 0);
                             bot.setControlState('forward', true);
                             bot.setControlState('sprint', true);
-                            setTimeout(() => { clearControls(); this._navBusy = false; }, 500);
-                            console.log('[DreamBot] NAV go right');
+                            finish(550);
+                            console.log('[DreamBot] NAV right');
                             return;
                         }
                         if (leftFree && rightFree) {
                             bot.look(yaw + (Math.random() > 0.5 ? Math.PI / 2 : -Math.PI / 2), 0);
                             bot.setControlState('forward', true);
-                            setTimeout(() => { clearControls(); this._navBusy = false; }, 450);
-                            console.log('[DreamBot] NAV go around');
+                            bot.setControlState('sprint', true);
+                            finish(500);
+                            console.log('[DreamBot] NAV around');
                             return;
                         }
-                        // Both sides blocked → dig through
-                        try {
-                            if (solid(fHead)) {
-                                await bot.dig(fHead);
-                                console.log('[DreamBot] NAV dig head', fHead.name);
+
+                        // Dig with timeout so dig never freezes the bot forever
+                        const digSafe = async (block) => {
+                            if (!block || !solid(block)) return;
+                            try {
+                                await Promise.race([
+                                    bot.dig(block),
+                                    new Promise((_, rej) => setTimeout(() => rej(new Error('dig timeout')), 4000))
+                                ]);
+                                console.log('[DreamBot] NAV dig', block.name);
+                            } catch (e) {
+                                console.warn('[DreamBot] dig fail', e.message);
+                                try { bot.stopDigging?.(); } catch {}
                             }
-                            if (solid(fFeet)) {
-                                await bot.dig(fFeet);
-                                console.log('[DreamBot] NAV dig feet', fFeet.name);
-                            }
-                        } catch {}
-                        this._navBusy = false;
+                        };
+                        if (solid(fHead)) await digSafe(fHead);
+                        if (solid(fFeet)) await digSafe(fFeet);
+                        // after dig, push forward briefly
+                        bot.setControlState('forward', true);
+                        bot.setControlState('sprint', true);
+                        finish(400);
                         return;
                     }
 
-                    // 5) Ceiling too low while jumping
+                    // 5) Ceiling
                     if (solid(aboveHead)) {
-                        try { await bot.dig(aboveHead); console.log('[DreamBot] NAV dig ceiling'); } catch {}
-                        this._navBusy = false;
+                        stopPath();
+                        try {
+                            await Promise.race([
+                                bot.dig(aboveHead),
+                                new Promise((_, rej) => setTimeout(() => rej(new Error('dig timeout')), 4000))
+                            ]);
+                            console.log('[DreamBot] NAV ceiling');
+                        } catch { try { bot.stopDigging?.(); } catch {} }
+                        finish(200);
                         return;
                     }
 
-                    // 6) Path 2 blocks ahead blocked but sides open → pre-turn
+                    // 6) Obstacle 2 blocks ahead → early turn
                     if (solid(f2Feet) && solid(f2Head)) {
                         const lf = air(lFeet) && air(lHead);
                         const rf = air(rFeet) && air(rHead);
                         if (lf || rf) {
+                            stopPath();
                             bot.look(yaw + (lf ? Math.PI / 3 : -Math.PI / 3), 0);
                             bot.setControlState('forward', true);
-                            setTimeout(() => { clearControls(); this._navBusy = false; }, 400);
+                            finish(400);
                             console.log('[DreamBot] NAV early turn');
                             return;
                         }
@@ -438,11 +504,12 @@ function applyFixes() {
 
                     this._navBusy = false;
                 } catch (e) {
+                    try { clearControls(); } catch {}
                     this._navBusy = false;
                 }
-            }, 1200);
+            }, 1000);
 
-            // Stuck detector: no movement → aggressive escape
+            // Stuck detector — stronger escape, always cancel path
             let still = 0;
             let lastP = null;
             setInterval(async () => {
@@ -451,68 +518,74 @@ function applyFixes() {
                     if (!bot?.entity) return;
                     if (this._navBusy) return;
                     const p = bot.entity.position;
-                    if (lastP && p.distanceTo(lastP) < 0.08) still++;
+                    if (lastP && p.distanceTo(lastP) < 0.1) still++;
                     else still = 0;
                     lastP = p.clone();
-                    if (still < 5) return; // ~7.5s stuck
+                    if (still < 4) return; // ~6s stuck
                     still = 0;
                     this._navBusy = true;
                     console.log('[DreamBot] NAV STUCK escape');
+                    stopPath();
+                    clearControls();
+
                     let Vec3;
                     try {
                         const v = await import('vec3');
                         Vec3 = v.default || v.Vec3;
                     } catch {}
-                    // dig all around body
+
                     if (Vec3) {
-                        for (const [ox, oy, oz] of [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[1,1,0],[-1,1,0],[0,1,1],[0,1,-1],[0,2,0]]) {
+                        for (const [ox, oy, oz] of [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[1,1,0],[-1,1,0],[0,1,1],[0,1,-1],[0,2,0],[0,0,0]]) {
                             try {
                                 const b = bot.blockAt(bot.entity.position.offset(ox, oy, oz));
                                 if (b && b.boundingBox === 'block' && b.name !== 'air') {
-                                    await bot.dig(b);
+                                    await Promise.race([
+                                        bot.dig(b),
+                                        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3500))
+                                    ]);
                                     console.log('[DreamBot] NAV dig out', b.name);
                                     break;
                                 }
-                            } catch {}
+                            } catch { try { bot.stopDigging?.(); } catch {} }
                         }
                     }
-                    // pillar if have blocks
+
                     const pl = bot.inventory.items().find(i => /dirt|cobblestone|planks|stone$/.test(i.name));
                     if (pl && Vec3) {
                         try {
                             await bot.equip(pl, 'hand');
-                            const below = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-                            if (below) {
+                            const bel = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+                            if (bel) {
                                 bot.setControlState('jump', true);
-                                await new Promise(r => setTimeout(r, 200));
-                                try { await bot.placeBlock(below, new Vec3(0, 1, 0)); } catch {}
+                                await new Promise(r => setTimeout(r, 180));
+                                try { await bot.placeBlock(bel, new Vec3(0, 1, 0)); } catch {}
                                 bot.setControlState('jump', false);
-                                console.log('[DreamBot] NAV pillar escape');
+                                console.log('[DreamBot] NAV pillar');
                             }
                         } catch {}
                     }
-                    bot.look(bot.entity.yaw + Math.PI * 0.6, 0);
+
+                    bot.look(bot.entity.yaw + Math.PI * 0.7, 0);
                     bot.setControlState('jump', true);
                     bot.setControlState('forward', true);
                     bot.setControlState('sprint', true);
                     setTimeout(() => {
-                        try {
-                            bot.setControlState('jump', false);
-                            bot.setControlState('forward', false);
-                            bot.setControlState('sprint', false);
-                        } catch {}
+                        clearControls();
                         this._navBusy = false;
-                    }, 700);
-                } catch { this._navBusy = false; }
+                    }, 800);
+                } catch {
+                    try { clearControls(); } catch {}
+                    this._navBusy = false;
+                }
             }, 1500);
 
-            // PASSIVE survival (same as active goals) — waits for NAV idle
+            // PASSIVE survival progression
             setInterval(async () => {
                 try {
                     if (dreamBusy() || this._navBusy || isPathing() || isActing()) return;
                     const bot = this.bot;
                     if (!bot?.entity) return;
-                    if (!dreamAcquire(20000)) return;
+                    if (!dreamAcquire(18000)) return;
                     console.log('[DreamBot] PASSIVE tick');
                     const skills = await import('./library/skills.js');
                     const inv = () => bot.inventory.items();
@@ -542,8 +615,13 @@ function applyFixes() {
                                 if (log.position.distanceTo(bot.entity.position) > 3) {
                                     try { await skills.goToPosition(bot, log.position.x, log.position.y, log.position.z, 2); } catch {}
                                 }
-                                await bot.dig(log); console.log('[DreamBot] dig log'); done(); return;
-                            } catch {}
+                                await Promise.race([
+                                    bot.dig(log),
+                                    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))
+                                ]);
+                                console.log('[DreamBot] dig log');
+                                done(); return;
+                            } catch { try { bot.stopDigging?.(); } catch {} }
                         }
                     }
                     if (logs >= 1 && planks < 12) {
@@ -599,7 +677,7 @@ function applyFixes() {
                 try {
                     if (dreamBusy() || this._navBusy || isPathing() || isActing()) return;
                     if (!this.self_prompter || this.self_prompter.isActive?.()) return;
-                    this.self_prompter.start('Survive. Dig walls, jump steps, bridge gaps, go around. Always !command.');
+                    this.self_prompter.start('Survive. Dig walls, jump, go around. Always !command.');
                 } catch {}
             }, 90000);
 
@@ -633,7 +711,7 @@ function applyFixes() {
     write('src/utils/mcdata.js', mc);
   }
 
-  console.log('[fetch-base] NAV BRAIN + passive applied');
+  console.log('[fetch-base] replaceAll fix + NAV v2 applied');
 }
 
 try {
@@ -677,7 +755,7 @@ export class Camera extends EventEmitter {
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
   const ms = join(ROOT, 'scripts', 'patch-mindserver.js');
   if (existsSync(ms)) { try { run(`node "${ms}"`); } catch {} }
-  console.log('[fetch-base] Ready — NAV scan + passive');
+  console.log('[fetch-base] Ready — replaceAll fixed + NAV dig timeout');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);
