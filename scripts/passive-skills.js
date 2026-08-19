@@ -1,10 +1,11 @@
 /**
- * PASSIVE BRAIN — pure code + autobot skills (veins/drops/trees).
+ * PASSIVE BRAIN — pure code + autobot + house builder.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
 import { dryFeet, escapeHole } from './escape-hole.js';
 import { runAutobotSkills } from './autobot-skills.js';
+import { maybeBuildHouse } from './house-builder.js';
 
 const require = createRequire(import.meta.url);
 const { goals } = pathfinder;
@@ -400,6 +401,7 @@ export async function runPassiveSkillTick(agent) {
 
   if (await escapeHole(bot)) return;
   try { if (await runAutobotSkills(bot)) return; } catch (e) { console.warn('[AUTO]', (e.message || '').slice(0, 40)); }
+  try { if (await maybeBuildHouse(bot)) return; } catch (e) { console.warn('[HOUSE]', (e.message || '').slice(0, 40)); }
   if (await emergencyFood(bot)) return;
   if (await bridgeGap(bot)) return;
 
@@ -460,6 +462,10 @@ export async function runPassiveSkillTick(agent) {
 
   if (cobble >= 8 && !hasFurnace && canTryCraft('furnace')) {
     if (await craft(bot, 'furnace', 1)) return;
+  }
+
+  if (!has(bot, 'chest') && planks >= 8 && canTryCraft('chest')) {
+    if (await craft(bot, 'chest', 1)) return;
   }
 
   if (stonePick || ironPick || diaPick) {
@@ -533,5 +539,5 @@ export function startPassiveSkills(agent) {
 
   setTimeout(tick, 1500);
   setInterval(tick, 2500);
-  console.log('[PASSIVE] BRAIN ON — autobot veins + sprint + interrupt');
+  console.log('[PASSIVE] BRAIN ON — house + autobot + sprint');
 }
