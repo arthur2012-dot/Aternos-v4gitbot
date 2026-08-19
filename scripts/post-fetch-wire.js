@@ -1,5 +1,5 @@
 /**
- * Runs after fetch-base.js — copies modules and injects passive skills + pvp if missing.
+ * After fetch-base — wire PvP, passive skills, Baritone-nav, Voyager curriculum.
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
 import { join, dirname } from 'path';
@@ -20,6 +20,8 @@ function copy(from, to) {
 
 copy('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 copy('scripts/passive-skills.js', 'src/agent/passive-skills.js');
+copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
+copy('scripts/voyager-skills.js', 'src/agent/voyager-skills.js');
 
 const agentPath = join(ROOT, 'src/agent/agent.js');
 if (!existsSync(agentPath)) {
@@ -28,57 +30,40 @@ if (!existsSync(agentPath)) {
 }
 
 let agent = readFileSync(agentPath, 'utf8');
-let changed = false;
 
-if (!agent.includes('[DreamBot] PASSIVE SKILLS')) {
-  const inject = `
-            // [DreamBot] PASSIVE SKILLS — swarm tech-tree (no LLM)
+if (!agent.includes('[DreamBot] STACK LOAD')) {
+  const block = `
+            // [DreamBot] STACK LOAD — PvP + passive + Baritone-nav + Voyager
+            try {
+                const { startPvpCombat } = await import('./pvp-combat.js');
+                startPvpCombat(this);
+            } catch (e) { console.warn('[DreamBot] pvp', e.message); }
             try {
                 const { startPassiveSkills } = await import('./passive-skills.js');
                 startPassiveSkills(this);
-            } catch (e) { console.warn('[DreamBot] passive skills', e.message); }
+            } catch (e) { console.warn('[DreamBot] passive', e.message); }
+            try {
+                const { startBaritoneNav } = await import('./baritone-nav.js');
+                await startBaritoneNav(this);
+            } catch (e) { console.warn('[DreamBot] baritone-nav', e.message); }
+            try {
+                const { startVoyagerCurriculum } = await import('./voyager-skills.js');
+                startVoyagerCurriculum(this);
+            } catch (e) { console.warn('[DreamBot] voyager', e.message); }
 `;
-
-  if (agent.includes("startPvpCombat(this)")) {
+  if (agent.includes("this.bot.once('spawn'")) {
     agent = agent.replace(
-      /startPvpCombat\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] pvp load', e\.message\); \}/g,
-      `startPvpCombat(this);
-            } catch (e) { console.warn('[DreamBot] pvp load', e.message); }${inject}`
+      /this\.bot\.once\('spawn', async \(\) => \{/,
+      `this.bot.once('spawn', async () => {${block}`
     );
-    changed = true;
-  } else if (agent.includes("pathfinder dig+parkour+sprint")) {
+  } else if (agent.includes('async startSession')) {
     agent = agent.replace(
-      /console\.log\('\[DreamBot\] pathfinder dig\+parkour\+sprint'\);/,
-      `console.log('[DreamBot] pathfinder dig+parkour+sprint');
-            try {
-                const { startPvpCombat } = await import('./pvp-combat.js');
-                startPvpCombat(this);
-            } catch (e) { console.warn('[DreamBot] pvp load', e.message); }${inject}`
+      /async startSession\([^)]*\) \{/,
+      (m) => m + block
     );
-    changed = true;
-  } else {
-    // last resort: after first spawn once
-    agent = agent.replace(
-      /this\.bot\.once\('spawn', async \(\) => \{/
-      ,
-      `this.bot.once('spawn', async () => {
-            try {
-                const { startPvpCombat } = await import('./pvp-combat.js');
-                startPvpCombat(this);
-            } catch (e) { console.warn('[DreamBot] pvp load', e.message); }
-            try {
-                const { startPassiveSkills } = await import('./passive-skills.js');
-                startPassiveSkills(this);
-            } catch (e) { console.warn('[DreamBot] passive skills', e.message); }
-`
-    );
-    changed = true;
   }
-}
-
-if (changed) {
   writeFileSync(agentPath, agent);
-  console.log('[post-wire] agent.js updated with PASSIVE SKILLS');
+  console.log('[post-wire] agent.js wired: PvP + passive + Baritone + Voyager');
 } else {
-  console.log('[post-wire] passive skills already present or no hook');
+  console.log('[post-wire] stack already wired');
 }
