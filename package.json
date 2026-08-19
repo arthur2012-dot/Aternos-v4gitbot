@@ -40,7 +40,7 @@
     },
     "scripts": {
         "postinstall": "node scripts/fetch-base.js || echo '[postinstall] fetch-base will retry on start'",
-        "prestart": "node scripts/fetch-base.js",
+        "prestart": "node scripts/fetch-base.js && node scripts/post-fetch-wire.js",
         "start": "node main.js"
     }
 }
