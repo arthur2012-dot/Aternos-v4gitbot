@@ -22,6 +22,7 @@ copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
 copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
 copy('scripts/task-guard.js', 'src/agent/task-guard.js');
 copy('scripts/dig-place.js', 'src/agent/dig-place.js');
+copy('scripts/koneko-behaviors.js', 'src/agent/koneko-behaviors.js');
 
 const agentPath = join(ROOT, 'src/agent/agent.js');
 if (!existsSync(agentPath)) process.exit(0);
@@ -71,6 +72,10 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
                 startPvpCombat(this);
             } catch (e) { console.warn('[DreamBot] pvp', e.message); }
             try {
+                const { startKonekoBehaviors } = await import('./koneko-behaviors.js');
+                await startKonekoBehaviors(this);
+            } catch (e) { console.warn('[DreamBot] koneko', e.message); }
+            try {
                 const { startAntiFreeze } = await import('./anti-freeze.js');
                 startAntiFreeze(this);
             } catch (e) { console.warn('[DreamBot] anti-freeze', e.message); }
@@ -85,7 +90,18 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
       `this.bot.once('spawn', async () => {${block}`
     );
   }
+} else if (!agent.includes('startKonekoBehaviors')) {
+  // already has FULL STACK — inject koneko if missing
+  agent = agent.replace(
+    /startPvpCombat\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] pvp', e\.message\); \}/,
+    `startPvpCombat(this);
+            } catch (e) { console.warn('[DreamBot] pvp', e.message); }
+            try {
+                const { startKonekoBehaviors } = await import('./koneko-behaviors.js');
+                await startKonekoBehaviors(this);
+            } catch (e) { console.warn('[DreamBot] koneko', e.message); }`
+  );
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] dig-place + stack');
+console.log('[post-wire] koneko + full stack');
