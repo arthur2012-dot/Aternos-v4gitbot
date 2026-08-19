@@ -1,7 +1,12 @@
 /**
- * DreamBot UNIFIED navigation stack
- * Local layer does NOT interrupt pathfinder/actions mid-task.
+ * UNIFIED navigation — ESM only (no bare require)
  */
+import { createRequire } from 'module';
+import pathfinder from 'mineflayer-pathfinder';
+import { Vec3 } from 'vec3';
+
+const require = createRequire(import.meta.url);
+const { Movements, goals } = pathfinder;
 
 const AIR = new Set(['air', 'cave_air', 'void_air', 'light']);
 const WATER = new Set(['water', 'flowing_water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass']);
@@ -40,6 +45,7 @@ function isTaskBusy(bot, agent) {
   try {
     if (bot._dreamPvpActive) return true;
     if (agent?.actions?.executing) return true;
+    if (agent?._passiveRunning) return true;
     if (bot.pathfinder?.isMoving?.()) return true;
     if (bot.targetDigBlock) return true;
   } catch {}
@@ -62,7 +68,6 @@ async function withTimeout(p, ms) {
 
 function setupPrismarine(bot) {
   try {
-    const { Movements } = require('mineflayer-pathfinder');
     const m = new Movements(bot);
     m.canDig = true;
     m.allowSprinting = true;
@@ -73,14 +78,14 @@ function setupPrismarine(bot) {
     m.maxDropDown = 4;
     m.scafoldingBlocks = [
       'dirt', 'cobblestone', 'stone', 'netherrack',
-      'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks',
-      'cobbled_deepslate', 'tuff', 'andesite', 'diorite', 'granite',
+      'oak_planks', 'spruce_planks', 'birch_planks',
+      'cobbled_deepslate', 'tuff', 'andesite',
     ];
     if (typeof m.digCost === 'number') m.digCost = 4;
     if (typeof m.placeCost === 'number') m.placeCost = 3;
     bot.pathfinder.setMovements(m);
     bot.pathfinder.thinkTimeout = 8000;
-    console.log('[NAV-STACK] Prismarine pathfinder MAX');
+    console.log('[NAV-STACK] Prismarine pathfinder ON');
   } catch (e) {
     console.warn('[NAV-STACK] prismarine', e.message);
   }
@@ -97,7 +102,7 @@ async function setupAshfinder(bot) {
     if (typeof loader !== 'function') return false;
     bot.loadPlugin(loader);
     configAsh(bot);
-    console.log('[NAV-STACK] mineflayer-baritone (ashfinder) ON');
+    console.log('[NAV-STACK] ashfinder ON');
     return !!bot.ashfinder;
   } catch (e) {
     console.warn('[NAV-STACK] ashfinder skip', (e.message || '').slice(0, 70));
@@ -118,37 +123,8 @@ function configAsh(bot) {
     c.breakBlocks = true;
     c.placeBlocks = true;
     c.maxFallDist = 4;
-    c.maxWaterDist = 48;
     c.thinkTimeout = 50000;
-    c.stuckTimeout = 5000;
-    c.disposableBlocks = [
-      'dirt', 'cobblestone', 'stone', 'andesite', 'diorite', 'granite',
-      'netherrack', 'oak_planks', 'spruce_planks', 'birch_planks',
-      'cobbled_deepslate', 'tuff', 'sand',
-    ];
-    c.blocksToAvoid = ['lava', 'fire', 'magma_block', 'cactus'];
   } catch {}
-}
-
-async function setupNxgOptional(bot) {
-  if (process.env.DREAM_USE_NXG !== '1') {
-    console.log('[NAV-STACK] nxg OFF');
-    return false;
-  }
-  try {
-    bot._prismarinePathfinder = bot.pathfinder;
-    const nxg = await import('@nxg-org/mineflayer-pathfinder');
-    const plugin = nxg.default || nxg.pathfinder || nxg.plugin || nxg;
-    if (typeof plugin === 'function') {
-      plugin(bot);
-      bot._nxgPathfinder = bot.pathfinder;
-      if (bot._prismarinePathfinder) bot.pathfinder = bot._prismarinePathfinder;
-      return true;
-    }
-  } catch (e) {
-    console.warn('[NAV-STACK] nxg skip', (e.message || '').slice(0, 70));
-  }
-  return false;
 }
 
 function installDreamGoto(bot) {
@@ -163,31 +139,29 @@ function installDreamGoto(bot) {
   bot.dreamGoto = async (x, y, z, range = 1) => {
     if (!bot.entity) return false;
     if (inWater(bot)) await escapeWater(bot);
-    const { Vec3 } = require('vec3');
     const target = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
 
     if (bot.ashfinder) {
       try {
-        const { goals } = await import('@miner-org/mineflayer-baritone');
-        const goal = goals.GoalNear
-          ? new goals.GoalNear(target, range)
-          : new goals.GoalExact(target);
-        await withTimeout(bot.ashfinder.goto(goal), 55000);
-        return true;
+        const bar = await import('@miner-org/mineflayer-baritone');
+        const g = bar.goals || bar.default?.goals;
+        if (g?.GoalNear) {
+          await withTimeout(bot.ashfinder.goto(new g.GoalNear(target, range)), 55000);
+          return true;
+        }
       } catch (e) {
-        console.warn('[NAV-STACK] ashfinder fail', (e.message || '').slice(0, 40));
+        console.warn('[NAV-STACK] ash fail', (e.message || '').slice(0, 40));
       }
     }
 
     try {
-      const { goals } = require('mineflayer-pathfinder');
       await withTimeout(
         bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, range)),
         40000
       );
       return true;
     } catch (e) {
-      console.warn('[NAV-STACK] prismarine fail', (e.message || '').slice(0, 40));
+      console.warn('[NAV-STACK] path fail', (e.message || '').slice(0, 40));
       return false;
     }
   };
@@ -206,7 +180,6 @@ async function escapeWater(bot) {
     if (!inWater(bot)) break;
     bot.setControlState('jump', true);
     bot.setControlState('forward', true);
-    bot.setControlState('sprint', true);
     try { await bot.look(bot.entity.yaw, -0.55, true); } catch {}
     await new Promise(r => setTimeout(r, 180));
   }
@@ -221,7 +194,6 @@ function startLocalLayer(bot, agent) {
 
   setInterval(async () => {
     if (busy || !bot.entity) return;
-    // NEVER interrupt a running task / path / dig
     if (isTaskBusy(bot, agent)) return;
 
     if (inWater(bot)) {
@@ -241,7 +213,6 @@ function startLocalLayer(bot, agent) {
       const gap = at(fx, -1, fz);
 
       if (solid(ff) && !solid(fh)) {
-        bot.setControlState('sprint', true);
         bot.setControlState('jump', true);
         bot.setControlState('forward', true);
         await new Promise(r => setTimeout(r, 280));
@@ -255,7 +226,7 @@ function startLocalLayer(bot, agent) {
             return;
           }
         }
-        bot.look(yaw + 1.4, 0, true);
+        try { await bot.look(yaw + 1.4, 0, true); } catch {}
         bot.setControlState('forward', true);
         await new Promise(r => setTimeout(r, 350));
         bot.clearControlStates();
@@ -267,7 +238,7 @@ function startLocalLayer(bot, agent) {
           try {
             await bot.equip(item, 'hand');
             const ref = bot.blockAt(pos.offset(0, -1, 0));
-            if (ref) await bot.placeBlock(ref, { x: Math.round(fx), y: 0, z: Math.round(fz) });
+            if (ref) await bot.placeBlock(ref, new Vec3(Math.round(fx), 0, Math.round(fz)));
           } catch {}
         }
       }
@@ -275,8 +246,8 @@ function startLocalLayer(bot, agent) {
     } finally {
       busy = false;
     }
-  }, 1200);
-  console.log('[NAV-STACK] local layer ON (respects tasks)');
+  }, 1400);
+  console.log('[NAV-STACK] local layer ON');
 }
 
 function startPassiveGoto(bot, agent) {
@@ -347,7 +318,6 @@ export async function startNavStack(agent) {
 
   setupPrismarine(bot);
   await setupAshfinder(bot);
-  await setupNxgOptional(bot);
   installDreamGoto(bot);
 
   const boot = () => {
@@ -355,7 +325,7 @@ export async function startNavStack(agent) {
     if (bot.ashfinder) configAsh(bot);
     startLocalLayer(bot, agent);
     startPassiveGoto(bot, agent);
-    console.log('[NAV-STACK] READY (tasks respected)');
+    console.log('[NAV-STACK] READY');
   };
 
   if (bot.entity) boot();
