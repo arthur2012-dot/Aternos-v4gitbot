@@ -1,5 +1,5 @@
 /**
- * UNIFIED navigation — ESM only (no bare require)
+ * UNIFIED navigation — dig out 1-high traps, climb holes, fast dig
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -15,7 +15,7 @@ function solid(b) {
   if (!b) return false;
   const n = b.name || '';
   if (AIR.has(n) || WATER.has(n) || n.includes('water')) return false;
-  if (/sign|torch|carpet|button|rail|flower|grass|fern|dead_bush/.test(n)) return false;
+  if (/sign|torch|carpet|button|rail|flower|grass|fern|dead_bush|snow$/.test(n)) return false;
   return b.boundingBox === 'block';
 }
 
@@ -26,7 +26,7 @@ function isWater(b) {
 
 function diggable(b) {
   if (!solid(b)) return false;
-  return !/bedrock|barrier|obsidian|command|spawner|end_portal/.test(b.name || '');
+  return !/bedrock|barrier|obsidian|command|spawner|end_portal|reinforced/.test(b.name || '');
 }
 
 function inWater(bot) {
@@ -57,13 +57,150 @@ async function withTimeout(p, ms) {
   try {
     return await Promise.race([
       p,
-      new Promise((_, rej) => {
-        t = setTimeout(() => rej(new Error('timeout')), ms);
-      }),
+      new Promise((_, rej) => { t = setTimeout(() => rej(new Error('timeout')), ms); }),
     ]);
   } finally {
     clearTimeout(t);
   }
+}
+
+async function fastDig(bot, block) {
+  if (!block || !diggable(block)) return false;
+  try {
+    // equip best tool quickly
+    const items = bot.inventory.items();
+    const isWood = /_log$|planks|leaves/.test(block.name);
+    const isDirt = /dirt|grass_block|sand|gravel|clay|mud/.test(block.name);
+    let tool = null;
+    if (isWood) tool = items.find(i => /_axe$/.test(i.name));
+    else if (isDirt) tool = items.find(i => /_shovel$/.test(i.name));
+    else tool = items.find(i => /_pickaxe$/.test(i.name));
+    if (tool) {
+      try { await bot.equip(tool, 'hand'); } catch {}
+    }
+    await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
+    await withTimeout(bot.dig(block, true), 6000); // forceLook
+    return true;
+  } catch {
+    try { bot.stopDigging(); } catch {}
+    return false;
+  }
+}
+
+function scaffoldItem(bot) {
+  return bot.inventory.items().find(i =>
+    /dirt|cobblestone|stone$|andesite|diorite|granite|netherrack|_planks$|cobbled_deepslate|tuff|sand|gravel/.test(i.name)
+  );
+}
+
+/** Place one block under feet or in front to climb out of hole */
+async function placeScaffold(bot, offset) {
+  const item = scaffoldItem(bot);
+  if (!item) return false;
+  try {
+    await bot.equip(item, 'hand');
+    const ref = bot.blockAt(bot.entity.position.offset(0, -1, 0));
+    if (!ref) return false;
+    // offset is Vec3 direction from feet
+    const face = offset || new Vec3(0, 1, 0);
+    // If placing under: sneak + place below while jumping
+    if (face.y > 0) {
+      bot.setControlState('sneak', true);
+      bot.setControlState('jump', true);
+      await new Promise(r => setTimeout(r, 80));
+      try {
+        await withTimeout(bot.placeBlock(ref, new Vec3(0, 1, 0)), 1500);
+      } catch {}
+      bot.clearControlStates();
+      return true;
+    }
+    await withTimeout(bot.placeBlock(ref, face), 1500);
+    return true;
+  } catch {
+    bot.clearControlStates();
+    return false;
+  }
+}
+
+/** Detect 1-block-high crawl / head stuck / pit */
+function trapState(bot) {
+  const pos = bot.entity.position;
+  const head = bot.blockAt(pos.offset(0, 1, 0));
+  const above = bot.blockAt(pos.offset(0, 2, 0));
+  const below = bot.blockAt(pos.offset(0, -1, 0));
+  const yaw = bot.entity.yaw;
+  const fx = -Math.sin(yaw);
+  const fz = -Math.cos(yaw);
+  const front = bot.blockAt(pos.offset(fx, 0, fz));
+  const frontHead = bot.blockAt(pos.offset(fx, 1, fz));
+  const frontDown = bot.blockAt(pos.offset(fx, -1, fz));
+
+  const headSolid = solid(head);
+  const aboveSolid = solid(above);
+  const inPit =
+    solid(below) &&
+    solid(bot.blockAt(pos.offset(1, 0, 0))) &&
+    solid(bot.blockAt(pos.offset(-1, 0, 0))) &&
+    solid(bot.blockAt(pos.offset(0, 0, 1))) &&
+    solid(bot.blockAt(pos.offset(0, 0, -1)));
+
+  // 1-high: body in space where head block is solid (crouch height)
+  const oneHigh = headSolid || (solid(front) && solid(frontHead));
+
+  return { head, above, below, front, frontHead, frontDown, headSolid, aboveSolid, inPit, oneHigh, fx, fz, pos, yaw };
+}
+
+async function escapeTrap(bot) {
+  const t = trapState(bot);
+  console.log('[NAV] escape trap oneHigh=' + t.oneHigh + ' pit=' + t.inPit);
+
+  // 1) Dig head block if 1-high cage
+  if (t.headSolid && diggable(t.head)) {
+    if (await fastDig(bot, t.head)) return true;
+  }
+  if (t.aboveSolid && diggable(t.above)) {
+    if (await fastDig(bot, t.above)) return true;
+  }
+
+  // 2) Dig front wall at eye level
+  if (solid(t.frontHead) && diggable(t.frontHead)) {
+    if (await fastDig(bot, t.frontHead)) return true;
+  }
+  if (solid(t.front) && diggable(t.front)) {
+    if (await fastDig(bot, t.front)) return true;
+  }
+
+  // 3) Dig any side wall
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const side = bot.blockAt(t.pos.offset(dx, 0, dz));
+    const sideH = bot.blockAt(t.pos.offset(dx, 1, dz));
+    if (diggable(sideH) && (await fastDig(bot, sideH))) return true;
+    if (diggable(side) && (await fastDig(bot, side))) return true;
+  }
+
+  // 4) Tower up with blocks (hole escape)
+  if (scaffoldItem(bot)) {
+    for (let i = 0; i < 3; i++) {
+      const up = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+      if (solid(up) && diggable(up)) {
+        await fastDig(bot, up);
+      }
+      const ok = await placeScaffold(bot, new Vec3(0, 1, 0));
+      if (!ok) break;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    return true;
+  }
+
+  // 5) Turn and short move
+  try {
+    await bot.look(t.yaw + Math.PI / 2, 0, true);
+  } catch {}
+  bot.setControlState('jump', true);
+  bot.setControlState('forward', true);
+  await new Promise(r => setTimeout(r, 400));
+  bot.clearControlStates();
+  return false;
 }
 
 function setupPrismarine(bot) {
@@ -79,13 +216,13 @@ function setupPrismarine(bot) {
     m.scafoldingBlocks = [
       'dirt', 'cobblestone', 'stone', 'netherrack',
       'oak_planks', 'spruce_planks', 'birch_planks',
-      'cobbled_deepslate', 'tuff', 'andesite',
+      'cobbled_deepslate', 'tuff', 'andesite', 'dirt',
     ];
-    if (typeof m.digCost === 'number') m.digCost = 4;
-    if (typeof m.placeCost === 'number') m.placeCost = 3;
+    if (typeof m.digCost === 'number') m.digCost = 2;
+    if (typeof m.placeCost === 'number') m.placeCost = 2;
     bot.pathfinder.setMovements(m);
-    bot.pathfinder.thinkTimeout = 8000;
-    console.log('[NAV-STACK] Prismarine pathfinder ON');
+    bot.pathfinder.thinkTimeout = 6000;
+    console.log('[NAV-STACK] Prismarine ON');
   } catch (e) {
     console.warn('[NAV-STACK] prismarine', e.message);
   }
@@ -105,7 +242,7 @@ async function setupAshfinder(bot) {
     console.log('[NAV-STACK] ashfinder ON');
     return !!bot.ashfinder;
   } catch (e) {
-    console.warn('[NAV-STACK] ashfinder skip', (e.message || '').slice(0, 70));
+    console.warn('[NAV-STACK] ashfinder skip', (e.message || '').slice(0, 60));
     return false;
   }
 }
@@ -118,12 +255,10 @@ function configAsh(bot) {
     af.enablePlacing?.();
     const c = af.config || {};
     c.parkour = true;
-    c.proParkour = true;
     c.swimming = true;
     c.breakBlocks = true;
     c.placeBlocks = true;
     c.maxFallDist = 4;
-    c.thinkTimeout = 50000;
   } catch {}
 }
 
@@ -146,22 +281,18 @@ function installDreamGoto(bot) {
         const bar = await import('@miner-org/mineflayer-baritone');
         const g = bar.goals || bar.default?.goals;
         if (g?.GoalNear) {
-          await withTimeout(bot.ashfinder.goto(new g.GoalNear(target, range)), 55000);
+          await withTimeout(bot.ashfinder.goto(new g.GoalNear(target, range)), 45000);
           return true;
         }
-      } catch (e) {
-        console.warn('[NAV-STACK] ash fail', (e.message || '').slice(0, 40));
-      }
+      } catch {}
     }
-
     try {
       await withTimeout(
         bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, range)),
-        40000
+        35000
       );
       return true;
-    } catch (e) {
-      console.warn('[NAV-STACK] path fail', (e.message || '').slice(0, 40));
+    } catch {
       return false;
     }
   };
@@ -176,12 +307,12 @@ async function escapeWater(bot) {
   if (!inWater(bot)) return true;
   console.log('[NAV-STACK] water escape');
   bot.dreamStopNav?.();
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 25; i++) {
     if (!inWater(bot)) break;
     bot.setControlState('jump', true);
     bot.setControlState('forward', true);
-    try { await bot.look(bot.entity.yaw, -0.55, true); } catch {}
-    await new Promise(r => setTimeout(r, 180));
+    try { await bot.look(bot.entity.yaw, -0.5, true); } catch {}
+    await new Promise(r => setTimeout(r, 160));
   }
   bot.clearControlStates();
   return !inWater(bot);
@@ -191,63 +322,86 @@ function startLocalLayer(bot, agent) {
   if (bot._dreamNavLocal) return;
   bot._dreamNavLocal = true;
   let busy = false;
+  let stuckTicks = 0;
+  let lx = null, lz = null;
 
   setInterval(async () => {
     if (busy || !bot.entity) return;
-    if (isTaskBusy(bot, agent)) return;
+    // Allow trap escape even during passive — only skip heavy PvP
+    if (bot._dreamPvpActive) return;
+
+    const pos = bot.entity.position;
+    if (lx != null) {
+      const moved = Math.abs(pos.x - lx) + Math.abs(pos.z - lz);
+      if (moved < 0.08) stuckTicks++;
+      else stuckTicks = 0;
+    }
+    lx = pos.x;
+    lz = pos.z;
+
+    const t = trapState(bot);
+    const needEscape = t.oneHigh || t.inPit || stuckTicks >= 4;
 
     if (inWater(bot)) {
       busy = true;
       try { await escapeWater(bot); } finally { busy = false; }
       return;
     }
+
+    if (needEscape) {
+      busy = true;
+      try {
+        await escapeTrap(bot);
+        stuckTicks = 0;
+      } finally {
+        busy = false;
+      }
+      return;
+    }
+
+    if (isTaskBusy(bot, agent)) return;
+
     busy = true;
     try {
-      const pos = bot.entity.position;
       const yaw = bot.entity.yaw;
       const fx = -Math.sin(yaw);
       const fz = -Math.cos(yaw);
-      const at = (dx, dy, dz) => bot.blockAt(pos.offset(dx, dy, dz));
-      const ff = at(fx, 0, fz);
-      const fh = at(fx, 1, fz);
-      const gap = at(fx, -1, fz);
+      const ff = bot.blockAt(pos.offset(fx, 0, fz));
+      const fh = bot.blockAt(pos.offset(fx, 1, fz));
+      const gap = bot.blockAt(pos.offset(fx, -1, fz));
 
+      // step-up: jump
       if (solid(ff) && !solid(fh)) {
+        bot.setControlState('sprint', true);
         bot.setControlState('jump', true);
         bot.setControlState('forward', true);
-        await new Promise(r => setTimeout(r, 280));
+        await new Promise(r => setTimeout(r, 250));
         bot.clearControlStates();
         return;
       }
+      // wall: dig fast
       if (solid(ff) && solid(fh)) {
-        for (const blk of [fh, ff]) {
-          if (diggable(blk)) {
-            try { await withTimeout(bot.dig(blk), 4000); } catch { try { bot.stopDigging(); } catch {} }
-            return;
-          }
+        if (diggable(fh)) await fastDig(bot, fh);
+        else if (diggable(ff)) await fastDig(bot, ff);
+        else {
+          try { await bot.look(yaw + 1.2, 0, true); } catch {}
+          bot.setControlState('forward', true);
+          await new Promise(r => setTimeout(r, 300));
+          bot.clearControlStates();
         }
-        try { await bot.look(yaw + 1.4, 0, true); } catch {}
-        bot.setControlState('forward', true);
-        await new Promise(r => setTimeout(r, 350));
-        bot.clearControlStates();
         return;
       }
+      // gap: place bridge quickly
       if (!solid(gap) && !solid(ff) && !isWater(gap)) {
-        const item = bot.inventory.items().find(i => /dirt|cobble|planks|netherrack|stone/.test(i.name));
-        if (item) {
-          try {
-            await bot.equip(item, 'hand');
-            const ref = bot.blockAt(pos.offset(0, -1, 0));
-            if (ref) await bot.placeBlock(ref, new Vec3(Math.round(fx), 0, Math.round(fz)));
-          } catch {}
-        }
+        await placeScaffold(bot, new Vec3(Math.round(fx), 0, Math.round(fz)));
       }
     } catch {
     } finally {
       busy = false;
     }
-  }, 1400);
-  console.log('[NAV-STACK] local layer ON');
+  }, 700); // faster loop
+
+  console.log('[NAV-STACK] local layer ON (1-high + hole escape)');
 }
 
 function startPassiveGoto(bot, agent) {
@@ -261,7 +415,7 @@ function startPassiveGoto(bot, agent) {
       for (const name of names) {
         const id = mcData.blocksByName[name]?.id;
         if (id == null) continue;
-        const blocks = bot.findBlocks({ matching: id, maxDistance: dist, count: 4 });
+        const blocks = bot.findBlocks({ matching: id, maxDistance: dist, count: 5 });
         for (const bp of blocks) {
           const below = bot.blockAt(bp.offset(0, -1, 0));
           if (below && isWater(below)) continue;
@@ -275,14 +429,15 @@ function startPassiveGoto(bot, agent) {
 
   setInterval(async () => {
     if (run || !bot.entity) return;
-    if (isTaskBusy(bot, agent)) return;
+    if (bot._dreamPvpActive) return;
+    if (agent?._passiveRunning) return;
     if (inWater(bot)) return;
     run = true;
     try {
       const inv = bot.inventory.items();
       const logs = inv.filter(i => /_log$/.test(i.name)).reduce((s, i) => s + i.count, 0);
       const pick = inv.some(i => /pickaxe/.test(i.name));
-      const cobble = inv.filter(i => i.name === 'cobblestone').reduce((s, i) => s + i.count, 0);
+      const cobble = inv.filter(i => i.name === 'cobblestone' || i.name === 'stone').reduce((s, i) => s + i.count, 0);
 
       let b = null;
       let label = '';
@@ -294,21 +449,16 @@ function startPassiveGoto(bot, agent) {
         label = 'stone';
       }
       if (b) {
-        console.log('[NAV-STACK] passive', label);
-        if (await bot.dreamGotoBlock(b, 2)) {
-          try {
-            const tool = inv.find(i => label === 'wood' ? /axe/.test(i.name) : /pickaxe/.test(i.name));
-            if (tool) await bot.equip(tool, 'hand');
-            await withTimeout(bot.dig(b), 9000);
-          } catch { try { bot.stopDigging(); } catch {} }
-        }
+        console.log('[NAV-STACK] dig', label);
+        await bot.dreamGotoBlock(b, 2);
+        await fastDig(bot, b);
       }
     } catch (e) {
       console.warn('[NAV-STACK] passive', e.message);
     } finally {
       run = false;
     }
-  }, 16000);
+  }, 12000);
   console.log('[NAV-STACK] passive goto ON');
 }
 
@@ -330,7 +480,7 @@ export async function startNavStack(agent) {
 
   if (bot.entity) boot();
   else bot.once('spawn', boot);
-  bot.on('respawn', () => setTimeout(boot, 800));
+  bot.on('respawn', () => setTimeout(boot, 600));
 }
 
 export async function startBaritoneNav(agent) {

@@ -1,5 +1,5 @@
 /**
- * SAFE anti-freeze only — no random anti-AFK
+ * SAFE anti-freeze — uses same dig-out / tower logic, no random death sprint
  */
 export function startAntiFreeze(agent) {
   const bot = agent.bot;
@@ -15,51 +15,48 @@ export function startAntiFreeze(agent) {
     try {
       if (bot._dreamPvpActive) return true;
       if (agent.actions?.executing) return true;
-      if (agent._passiveRunning) return true;
-      if (bot.pathfinder?.isMoving?.()) return true;
       if (bot.targetDigBlock) return true;
     } catch {}
     return false;
   };
 
-  const dangerAhead = () => {
-    try {
-      const pos = bot.entity.position;
-      const yaw = bot.entity.yaw;
-      const fx = -Math.sin(yaw);
-      const fz = -Math.cos(yaw);
-      const feet = bot.blockAt(pos.offset(fx, 0, fz));
-      const down = bot.blockAt(pos.offset(fx, -1, fz));
-      const down2 = bot.blockAt(pos.offset(fx, -2, fz));
-      const n = (b) => (b?.name || '');
-      if (/lava|fire|magma/.test(n(feet)) || /lava|fire|magma/.test(n(down))) return true;
-      if ((!down || n(down) === 'air') && (!down2 || n(down2) === 'air')) return true;
-      if (/water/.test(n(feet)) && /water/.test(n(down))) return true;
-    } catch {}
-    return false;
+  const diggable = (b) => {
+    if (!b || b.boundingBox !== 'block') return false;
+    return !/bedrock|barrier|obsidian/.test(b.name || '');
   };
 
   const safeUnstuck = async () => {
-    if (unlocking || !bot.entity || isBusy()) return;
+    if (unlocking || !bot.entity) return;
     unlocking = true;
-    console.log('[ANTI-FREEZE] safe unstuck');
+    console.log('[ANTI-FREEZE] dig-out / tower');
     try {
       const pos = bot.entity.position;
       const yaw = bot.entity.yaw;
       const fx = -Math.sin(yaw);
       const fz = -Math.cos(yaw);
-      const candidates = [
+
+      // Dig head / front / sides
+      const blocks = [
         bot.blockAt(pos.offset(0, 1, 0)),
+        bot.blockAt(pos.offset(0, 2, 0)),
         bot.blockAt(pos.offset(fx, 1, fz)),
         bot.blockAt(pos.offset(fx, 0, fz)),
+        bot.blockAt(pos.offset(1, 0, 0)),
+        bot.blockAt(pos.offset(-1, 0, 0)),
+        bot.blockAt(pos.offset(0, 0, 1)),
+        bot.blockAt(pos.offset(0, 0, -1)),
       ];
-      for (const b of candidates) {
-        if (!b || b.boundingBox !== 'block') continue;
-        if (/bedrock|barrier|obsidian/.test(b.name)) continue;
+      for (const b of blocks) {
+        if (!diggable(b)) continue;
         try {
+          const items = bot.inventory.items();
+          const tool =
+            items.find(i => /_pickaxe$|_axe$|_shovel$/.test(i.name)) || null;
+          if (tool) await bot.equip(tool, 'hand');
+          await bot.lookAt(b.position.offset(0.5, 0.5, 0.5), true);
           await Promise.race([
-            bot.dig(b),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 3500)),
+            bot.dig(b, true),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 4500)),
           ]);
           stillCount = 0;
           return;
@@ -67,16 +64,32 @@ export function startAntiFreeze(agent) {
           try { bot.stopDigging(); } catch {}
         }
       }
-      try { await bot.look(yaw + Math.PI, 0, true); } catch {}
-      if (dangerAhead()) {
-        bot.setControlState('sneak', true);
-        bot.setControlState('back', true);
-        await new Promise(r => setTimeout(r, 400));
+
+      // Tower with dirt/cobble
+      const item = bot.inventory.items().find(i =>
+        /dirt|cobblestone|stone|_planks|netherrack/.test(i.name)
+      );
+      if (item) {
+        try {
+          await bot.equip(item, 'hand');
+          const ref = bot.blockAt(pos.offset(0, -1, 0));
+          if (ref) {
+            bot.setControlState('sneak', true);
+            bot.setControlState('jump', true);
+            await new Promise(r => setTimeout(r, 100));
+            const { Vec3 } = await import('vec3');
+            await bot.placeBlock(ref, new Vec3(0, 1, 0));
+          }
+        } catch {}
         bot.clearControlStates();
+        stillCount = 0;
         return;
       }
+
+      try { await bot.look(yaw + Math.PI, 0, true); } catch {}
+      bot.setControlState('jump', true);
       bot.setControlState('forward', true);
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 350));
       bot.clearControlStates();
     } catch (e) {
       console.warn('[ANTI-FREEZE]', e.message);
@@ -108,11 +121,12 @@ export function startAntiFreeze(agent) {
       const dz = Math.abs(z - lastZ);
       lastX = x;
       lastZ = z;
-      if (dx < 0.05 && dz < 0.05 && speed < 0.03) stillCount++;
+      if (dx < 0.06 && dz < 0.06 && speed < 0.04) stillCount++;
       else stillCount = 0;
-      if (stillCount >= 8) safeUnstuck(); // ~12s truly stuck
+      // ~6s stuck
+      if (stillCount >= 4) safeUnstuck();
     } catch {}
   }, 1500);
 
-  console.log('[ANTI-FREEZE] SAFE mode (no random AFK)');
+  console.log('[ANTI-FREEZE] SAFE dig-out/tower');
 }
