@@ -1,5 +1,5 @@
 /**
- * DreamBot — Mindcraft base + fixes + coder stub (no eslint needed)
+ * DreamBot — Mindcraft base + fixes + LIGHT vision (no prismarine-viewer lag)
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -139,7 +139,6 @@ function applyFixes() {
   );
   write('src/agent/agent.js', agent);
 
-  // AI non-block on self_prompter
   try {
     let sp = read('src/agent/self_prompter.js');
     sp = sp.replace(/await this\.agent\.actions\.stop\(\);/g, '/* no stop */ void 0;');
@@ -159,17 +158,76 @@ function applyFixes() {
     write('src/utils/mcdata.js', mc);
   }
 
-  // ALWAYS overwrite coder with stub (no eslint)
   copyStub('stubs/coder.js', 'src/agent/coder.js');
-  console.log('[fetch-base] coder stub installed (no eslint)');
+  console.log('[fetch-base] coder stub + fixes');
+}
 
-  console.log('[fetch-base] fixes applied');
+/** Install light vision (text scene) — same API as Mindcraft, no WebGL */
+function installLightVision() {
+  const lightPath = join(ROOT, 'scripts', 'light-vision.js');
+  let light = '';
+  if (existsSync(lightPath)) light = readFileSync(lightPath, 'utf8');
+
+  writeStub('src/agent/vision/browser_viewer.js', `// Light vision: no prismarine-viewer (avoids Railway crash/lag)
+export function addBrowserViewer() {
+  if (process.env.ENABLE_VIEWER === '1') {
+    console.warn('[VISION] ENABLE_VIEWER ignored in light mode (no prismarine-viewer)');
+  }
+}
+export function addViewer() {}
+export default { addBrowserViewer, addViewer };
+`);
+
+  writeStub('src/agent/vision/camera.js', `import { EventEmitter } from 'events';
+export class Camera extends EventEmitter {
+  constructor(bot, fp) {
+    super();
+    this.bot = bot;
+    this.fp = fp;
+    this.disabled = false;
+    this.mode = 'light-text';
+    setImmediate(() => this.emit('ready'));
+  }
+  async capture() { return null; }
+}
+`);
+
+  // vision_interpreter re-exports from light-vision if available, else inline minimal
+  if (light) {
+    write('src/agent/vision/vision_interpreter.js', light.replace(
+      /export function addBrowserViewer[\s\S]*$/,
+      ''
+    ) + `
+export default { VisionInterpreter, Camera, describeScene };
+`);
+    console.log('[fetch-base] LIGHT vision installed');
+  } else {
+    writeStub('src/agent/vision/vision_interpreter.js', `export class VisionInterpreter {
+  constructor(agent) {
+    this.agent = agent;
+    this.allow_vision = true;
+    this.camera = null;
+    console.log('[VISION] minimal light');
+  }
+  getCenterBlockInfo() {
+    try {
+      const b = this.agent.bot.blockAtCursor?.(5);
+      return b ? b.name + ' ' + b.position : 'nenhum';
+    } catch { return 'nenhum'; }
+  }
+  async lookAtPlayer(n) { return 'Olhando ' + n + ' | ' + this.getCenterBlockInfo(); }
+  async lookAtPosition(x,y,z) { return 'Olhando ' + x + ',' + y + ',' + z; }
+  async analyzeImage() { return this.getCenterBlockInfo(); }
+}
+`);
+  }
 }
 
 try {
   ensureTree();
   refresh();
   applyFixes();
+  installLightVision();
 
   writeFileSync(join(ROOT, 'src', 'settings.js'), "import settings from '../settings.js';\nexport default settings;\n");
   writeStub('src/agent/settings.js', `let settings = {};
@@ -180,21 +238,10 @@ export function setSettings(new_settings) {
     if (!settings.minecraft_version || settings.minecraft_version === 'auto' || settings.minecraft_version === false) {
         settings.minecraft_version = process.env.MC_VERSION || '1.21.11';
     }
-}
-`);
-  writeStub('src/agent/vision/browser_viewer.js', 'export function addBrowserViewer() {}\nexport function addViewer() {}\nexport default { addBrowserViewer, addViewer };\n');
-  writeStub('src/agent/vision/camera.js', `import { EventEmitter } from 'events';
-export class Camera extends EventEmitter {
-  constructor(bot, fp) { super(); this.bot = bot; this.fp = fp; this.disabled = true; setImmediate(() => this.emit('ready')); }
-  async capture() { return null; }
-}
-`);
-  writeStub('src/agent/vision/vision_interpreter.js', `export class VisionInterpreter {
-  constructor(agent) { this.agent = agent; this.allow_vision = false; this.camera = null; }
-  async lookAtPlayer() { return 'Vision disabled'; }
-  async lookAtPosition() { return 'Vision disabled'; }
-  getCenterBlockInfo() { return 'No block'; }
-  async analyzeImage() { return 'Vision disabled'; }
+    // force light vision flags
+    settings.allow_vision = true;
+    settings.render_bot_view = false;
+    settings.show_bot_views = false;
 }
 `);
   copyStub('stubs/math.js', 'src/utils/math.js');
@@ -203,7 +250,7 @@ export class Camera extends EventEmitter {
   copyStub('stubs/coder.js', 'src/agent/coder.js');
   copyStub('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 
-  console.log('[fetch-base] Ready');
+  console.log('[fetch-base] Ready (light vision)');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);
