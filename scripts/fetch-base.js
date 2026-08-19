@@ -1,6 +1,5 @@
 /**
- * DreamBot — Mindcraft base + fixes
- * Includes AI non-block: API wait must not kill tasks
+ * DreamBot — Mindcraft base + fixes + coder stub (no eslint needed)
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -66,31 +65,6 @@ function refresh() {
   }
 }
 
-function applyAiNonBlock() {
-  const spPath = join(ROOT, 'src/agent/self_prompter.js');
-  if (!existsSync(spPath)) return;
-  let sp = readFileSync(spPath, 'utf8');
-
-  // Never stop physical actions when pausing self-prompt (API lag)
-  sp = sp.replace(
-    /await this\.agent\.actions\.stop\(\);/g,
-    `/* [DreamBot] AI wait: do not actions.stop() */ void 0;`
-  );
-
-  // Soft stop when no command from LLM
-  sp = sp.replace(/MAX_NO_COMMAND = \d+/, 'MAX_NO_COMMAND = 40');
-  if (sp.includes('Stopping auto-prompting')) {
-    sp = sp.replace(
-      /Stopping auto-prompting[^`]*`/,
-      `Soft pause (API empty). Passive keeps moving.` + '`'
-    );
-  }
-  sp = sp.replace(/this\.state = STOPPED;/g, 'this.state = PAUSED;');
-
-  writeFileSync(spPath, sp);
-  console.log('[fetch-base] AI non-block: self_prompter never kills actions');
-}
-
 function applyFixes() {
   try {
     let prompter = read('src/models/prompter.js');
@@ -123,26 +97,9 @@ function applyFixes() {
     /agent\.cleanKill\(["']Got stuck[^"']*["']\)/g,
     `console.warn('[DreamBot] stuck — stay online')`
   );
-  if (!modes.includes('[DreamBot] soft interrupt')) {
-    for (const name of ['unstuck', 'hunting', 'item_collecting', 'torch_placing', 'elbow_room']) {
-      modes = modes.replace(
-        new RegExp(`(name:\\s*['\"]${name}['\"][\\s\\S]*?interrupt:\\s*)(agent\\s*=>\\s*[^,\\n]+)`),
-        `$1false /* [DreamBot] soft interrupt */`
-      );
-    }
-  }
   write('src/agent/modes.js', modes);
 
   let skills = read('src/agent/library/skills.js');
-  if (!skills.includes('[DreamBot] soft PathStopped')) {
-    skills = skills.replace(
-      /throw err;/g,
-      (m, offset, str) => {
-        // only near pathfinder goto - soft approach: already patched elsewhere
-        return m;
-      }
-    );
-  }
   if (!skills.includes('[DreamBot] collect soft')) {
     skills = skills.replace(
       /console\.log\(err\);\s*\/\/ log pathfinder errors for debugging/g,
@@ -176,15 +133,20 @@ function applyFixes() {
         }`
     );
   }
-  if (agent.includes("this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.')")) {
-    agent = agent.replace(
-      /this\.bot\.chat\(code > 1 \? 'Restarting\.': 'Exiting\.'\);/g,
-      `/* no Exiting chat */`
-    );
-  }
+  agent = agent.replace(
+    /this\.bot\.chat\(code > 1 \? 'Restarting\.': 'Exiting\.'\);/g,
+    `/* no Exiting chat */`
+  );
   write('src/agent/agent.js', agent);
 
-  applyAiNonBlock();
+  // AI non-block on self_prompter
+  try {
+    let sp = read('src/agent/self_prompter.js');
+    sp = sp.replace(/await this\.agent\.actions\.stop\(\);/g, '/* no stop */ void 0;');
+    sp = sp.replace(/MAX_NO_COMMAND = \d+/, 'MAX_NO_COMMAND = 40');
+    sp = sp.replace(/this\.state = STOPPED;/g, 'this.state = PAUSED;');
+    write('src/agent/self_prompter.js', sp);
+  } catch {}
 
   let mc = read('src/utils/mcdata.js');
   if (!mc.includes('DreamBot: NEVER delete version')) {
@@ -197,15 +159,14 @@ function applyFixes() {
     write('src/utils/mcdata.js', mc);
   }
 
-  console.log('[fetch-base] fixes + AI non-block applied');
+  // ALWAYS overwrite coder with stub (no eslint)
+  copyStub('stubs/coder.js', 'src/agent/coder.js');
+  console.log('[fetch-base] coder stub installed (no eslint)');
+
+  console.log('[fetch-base] fixes applied');
 }
 
 try {
-  try {
-    run('npm install --omit=dev --no-save mineflayer@latest minecraft-protocol@latest minecraft-data@latest');
-  } catch (e) {
-    console.warn('[fetch-base] protocol', e.message);
-  }
   ensureTree();
   refresh();
   applyFixes();
@@ -239,18 +200,10 @@ export class Camera extends EventEmitter {
   copyStub('stubs/math.js', 'src/utils/math.js');
   copyStub('stubs/examples.js', 'src/utils/examples.js');
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
+  copyStub('stubs/coder.js', 'src/agent/coder.js');
   copyStub('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 
-  // Run AI non-block patch script if present
-  const aiPatch = join(ROOT, 'scripts', 'patch-ai-nonblock.js');
-  if (existsSync(aiPatch)) {
-    try { run(`node "${aiPatch}"`); } catch (e) { console.warn('[fetch-base] ai-nonblock', e.message); }
-  }
-
-  const ms = join(ROOT, 'scripts', 'patch-mindserver.js');
-  if (existsSync(ms)) { try { run(`node "${ms}"`); } catch {} }
-
-  console.log('[fetch-base] Ready — API wait will not kill tasks');
+  console.log('[fetch-base] Ready');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);

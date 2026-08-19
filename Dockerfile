@@ -14,18 +14,19 @@ RUN apt-get update && \
 
 WORKDIR /app
 
+# Bust cache when deps change
+ARG CACHE_BUST=2026-08-19-eslint
+
 COPY package.json ./
 COPY scripts ./scripts
 COPY patches ./patches
 COPY stubs ./stubs
 
-# Single install — do not fail build on optional extras
-RUN npm install --omit=dev --no-audit --no-fund || \
-    (echo '[docker] npm install retry' && npm install --omit=dev --no-audit --no-fund --legacy-peer-deps)
+RUN npm install --omit=dev --no-audit --no-fund && \
+    npm install --no-save --no-audit eslint@^9.13.0 @eslint/js@^9.13.0 globals@^15.11.0 eslint-plugin-no-floating-promise@^2.0.0 open@^10.2.0
 
 COPY . .
 
-# Mindcraft tree + patches (non-fatal if network flake)
 RUN node scripts/fetch-base.js || echo '[docker] fetch-base deferred to start'
 
 ENV PORT=8080
