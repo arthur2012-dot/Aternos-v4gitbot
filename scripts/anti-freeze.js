@@ -1,6 +1,6 @@
 /**
- * Anti-freeze — when bot stands still like a statue (common pathfinder hang).
- * Runs every 0.7s in passive + active.
+ * Anti-freeze — only when truly idle (NOT while pathing, digging, or acting).
+ * Players nearby must NOT cancel tasks.
  */
 export function startAntiFreeze(agent) {
   const bot = agent.bot;
@@ -11,6 +11,18 @@ export function startAntiFreeze(agent) {
   let lastZ = null;
   let stillCount = 0;
   let unlocking = false;
+
+  const isBusy = () => {
+    try {
+      if (bot._dreamPvpActive) return true;
+      if (agent.actions?.executing) return true;
+      if (bot.pathfinder?.isMoving?.()) return true;
+      if (bot.targetDigBlock) return true;
+      if (bot._navBusy) return true;
+      if (agent._dreamLock && Date.now() < (agent._dreamLockUntil || 0)) return true;
+    } catch {}
+    return false;
+  };
 
   const clearAll = () => {
     try {
@@ -25,11 +37,10 @@ export function startAntiFreeze(agent) {
   };
 
   const forceMove = async (reason) => {
-    if (unlocking || !bot.entity) return;
+    if (unlocking || !bot.entity || isBusy()) return;
     unlocking = true;
     console.log('[ANTI-FREEZE]', reason);
     try {
-      // Kill stuck path
       try { bot.ashfinder?.stop?.(); } catch {}
       try {
         bot.pathfinder?.setGoal?.(null);
@@ -37,52 +48,25 @@ export function startAntiFreeze(agent) {
       } catch {}
       clearAll();
 
-      const yaw = bot.entity.yaw + (Math.random() > 0.5 ? 1.1 : -1.1);
+      const yaw = bot.entity.yaw + (Math.random() > 0.5 ? 1.0 : -1.0);
       try {
         await bot.look(yaw, 0, true);
       } catch {}
 
-      // Jump + sprint forward (breaks "standing still on block")
       bot.setControlState('jump', true);
       bot.setControlState('sprint', true);
       bot.setControlState('forward', true);
-      await new Promise(r => setTimeout(r, 400));
+      await new Promise(r => setTimeout(r, 350));
       bot.setControlState('jump', false);
-
-      // Sometimes dig block in front if head/feet blocked
-      try {
-        const pos = bot.entity.position;
-        const fx = -Math.sin(bot.entity.yaw);
-        const fz = -Math.cos(bot.entity.yaw);
-        const head = bot.blockAt(pos.offset(fx, 1, fz));
-        const foot = bot.blockAt(pos.offset(fx, 0, fz));
-        for (const b of [head, foot]) {
-          if (b && b.boundingBox === 'block' && !/bedrock|barrier|obsidian/.test(b.name)) {
-            try {
-              await Promise.race([
-                bot.dig(b),
-                new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 3000)),
-              ]);
-            } catch {
-              try { bot.stopDigging(); } catch {}
-            }
-            break;
-          }
-        }
-      } catch {}
-
-      bot.setControlState('forward', true);
-      bot.setControlState('sprint', true);
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 500));
       clearAll();
 
-      // Nudge pathfinder to a nearby point so he doesn't idle
       try {
         const { goals } = require('mineflayer-pathfinder');
         const p = bot.entity.position;
-        const nx = p.x + Math.sin(yaw) * 6;
-        const nz = p.z + Math.cos(yaw) * 6;
-        bot.pathfinder.setGoal(new goals.GoalNear(nx, p.y, nz, 1));
+        bot.pathfinder.setGoal(
+          new goals.GoalNear(p.x + Math.sin(yaw) * 5, p.y, p.z + Math.cos(yaw) * 5, 1)
+        );
       } catch {}
     } catch (e) {
       console.warn('[ANTI-FREEZE]', e.message);
@@ -95,8 +79,11 @@ export function startAntiFreeze(agent) {
   setInterval(() => {
     try {
       if (!bot.entity) return;
-      if (bot._dreamPvpActive) {
+      // Critical: do not interrupt real work
+      if (isBusy()) {
         stillCount = 0;
+        lastX = bot.entity.position.x;
+        lastZ = bot.entity.position.z;
         return;
       }
 
@@ -116,29 +103,13 @@ export function startAntiFreeze(agent) {
       lastX = x;
       lastZ = z;
 
-      // Almost no movement
-      if (dx < 0.08 && dz < 0.08 && speed < 0.05) {
-        stillCount++;
-      } else {
-        stillCount = 0;
-      }
+      if (dx < 0.06 && dz < 0.06 && speed < 0.04) stillCount++;
+      else stillCount = 0;
 
-      // ~2.1s frozen (3 * 0.7s)
-      if (stillCount >= 3) {
-        forceMove('standing still');
-      }
+      // ~3.5s truly idle
+      if (stillCount >= 5) forceMove('idle statue');
     } catch {}
   }, 700);
 
-  // Hard kick every 12s if still somehow idle
-  setInterval(() => {
-    try {
-      if (!bot.entity || bot._dreamPvpActive) return;
-      const v = bot.entity.velocity;
-      const speed = Math.sqrt(v.x * v.x + v.z * v.z);
-      if (speed < 0.03) forceMove('periodic nudge');
-    } catch {}
-  }, 12000);
-
-  console.log('[DreamBot] anti-freeze ON (breaks statue standstill)');
+  console.log('[DreamBot] anti-freeze ON (skips while pathing/acting)');
 }
