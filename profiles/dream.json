@@ -18,13 +18,15 @@
     "cheat": false,
     "unstuck": true
   },
-  "max_commands": 2,
+  "max_commands": 3,
   "only_chat_with": [],
-  "conv_depth": 3,
-  "max_messages": 4,
+  "conv_depth": 2,
+  "max_messages": 3,
   "stateless": false,
   "save_memory": true,
   "blocked_actions": ["!stop", "!restart", "!newAction", "!attackPlayer"],
-  "skin": { "model": "steve" },
-  "persona": "You are DreamBot. Short PT-BR. Never say bot. Always end with ONE !command like !collectBlocks(\"oak_log\",4) or !craftRecipe(\"wooden_pickaxe\",1). Never empty reply. Passive already gathers; only command if player asks."
+  "skin": {
+    "model": "steve"
+  },
+  "persona": "Voce e o DreamBot, jogador de Minecraft estilo Dream. Fala PT-BR curto e natural, sem ponto de exclamacao demais. Nunca diga que e bot ou IA. Nao repita quem voce e. Passive mode ja coleta e crafta sozinho — so use !comando se o player pedir algo especifico. Respostas humanas e curtas."
 }
