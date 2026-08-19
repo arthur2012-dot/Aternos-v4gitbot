@@ -1,6 +1,6 @@
 /**
- * Proxy /viewer → 127.0.0.1:3001
- * Express strips mount path; we put /viewer back (viewer uses prefix:'/viewer').
+ * V4: do NOT mount at /viewer (that strips the path → Cannot GET /).
+ * Use pathFilter so full /viewer/... reaches prismarine-viewer (prefix /viewer).
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import { join } from 'path';
@@ -14,7 +14,7 @@ function restoreFromBase() {
   if (!existsSync(base)) return false;
   mkdirSync(join(ROOT, 'src', 'mindcraft'), { recursive: true });
   copyFileSync(base, file);
-  console.log('[viewer-proxy] restored mindserver from base');
+  console.log('[viewer-proxy] restored mindserver');
   return true;
 }
 
@@ -23,11 +23,10 @@ if (!existsSync(file) && !restoreFromBase()) process.exit(0);
 let src = readFileSync(file, 'utf8');
 
 if (
-  src.includes('DREAMBOT_VIEWER_PROXY') && !src.includes('DREAMBOT_VIEWER_PROXY_V3') ||
+  (src.includes('DREAMBOT_VIEWER_PROXY') && !src.includes('DREAMBOT_VIEWER_PROXY_V4')) ||
   !src.includes('createMindServer') ||
   src.split('(').length !== src.split(')').length
 ) {
-  console.warn('[viewer-proxy] restore for V3');
   restoreFromBase();
   src = readFileSync(file, 'utf8');
 }
@@ -39,11 +38,12 @@ if (/const host = ['"]localhost['"]/.test(src)) {
   );
 }
 
-if (!src.includes('DREAMBOT_VIEWER_PROXY_V3')) {
-  src = src.replace(/\n\s*\/\/ DREAMBOT_VIEWER_PROXY[\s\S]*?viewer proxy[\s\S]*?\}\s*\n/g, '\n');
+if (!src.includes('DREAMBOT_VIEWER_PROXY_V4')) {
+  // strip any old proxy injects
+  src = src.replace(/\n\s*\/\/ DREAMBOT_VIEWER_PROXY[\s\S]*?viewer proxy[\s\S]*?\n/g, '\n');
 
   const proxyBlock = `
-    // DREAMBOT_VIEWER_PROXY_V3
+    // DREAMBOT_VIEWER_PROXY_V4
     try {
         import('http-proxy-middleware').then(function (mod) {
             var createProxyMiddleware = mod.createProxyMiddleware;
@@ -54,29 +54,25 @@ if (!src.includes('DREAMBOT_VIEWER_PROXY_V3')) {
                 changeOrigin: true,
                 ws: true,
                 xfwd: true,
-                // express.use('/viewer') strips prefix → put it back for prismarine prefix
-                pathRewrite: function (path) {
-                    if (!path || path === '/') return '/viewer/';
-                    if (path.indexOf('/viewer') === 0) return path;
-                    return '/viewer' + (path.charAt(0) === '/' ? path : '/' + path);
+                pathFilter: function (pathname) {
+                    return pathname === '/viewer' || pathname.indexOf('/viewer/') === 0;
                 }
             });
-            app.use('/viewer', _vp);
-            console.log('[DreamBot] /viewer proxy V3 → ' + viewerTarget);
+            app.use(_vp);
+            console.log('[DreamBot] /viewer proxy V4 (pathFilter) → ' + viewerTarget);
             setTimeout(function () {
                 try {
-                    if (typeof server !== 'undefined' && server && typeof server.on === 'function') {
+                    if (typeof server !== 'undefined' && server && server.on) {
                         server.on('upgrade', function (req, socket, head) {
                             try {
-                                if (req.url && String(req.url).indexOf('/viewer') === 0) {
-                                    _vp.upgrade(req, socket, head);
-                                }
+                                var u = String(req.url || '');
+                                if (u.indexOf('/viewer') === 0) _vp.upgrade(req, socket, head);
                             } catch (e) {}
                         });
-                        console.log('[DreamBot] /viewer WS upgrade hooked');
+                        console.log('[DreamBot] /viewer WS V4 hooked');
                     }
                 } catch (e) {}
-            }, 500);
+            }, 800);
         }).catch(function (e) {
             console.warn('[DreamBot] viewer proxy', e && e.message);
         });
@@ -94,16 +90,16 @@ if (!src.includes('DREAMBOT_VIEWER_PROXY_V3')) {
   }
 
   writeFileSync(file, src);
-  console.log('[viewer-proxy] V3 injected');
+  console.log('[viewer-proxy] V4 injected');
 } else {
   writeFileSync(file, src);
-  console.log('[viewer-proxy] V3 already present');
+  console.log('[viewer-proxy] V4 already present');
 }
 
 try {
   mkdirSync(publicDir, { recursive: true });
   writeFileSync(
     join(publicDir, 'mobile-view.html'),
-    '<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=/viewer/"></head><body>Abrindo...</body></html>'
+    '<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=/viewer/"></head><body>Abrindo visao 3D...</body></html>'
   );
 } catch {}
