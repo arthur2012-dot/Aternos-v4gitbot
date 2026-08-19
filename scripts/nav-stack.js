@@ -1,17 +1,6 @@
 /**
  * DreamBot UNIFIED navigation stack
- *
- * | Source | Runnable here? |
- * |--------|----------------|
- * | PrismarineJS/mineflayer-pathfinder | YES — required by Mindcraft |
- * | miner-org/mineflayer-baritone (ashfinder) | YES — secondary goto |
- * | Minecraft-Pathfinding (@nxg-org/mineflayer-pathfinder) | OPTIONAL — experimental, can conflict |
- * | cabaletta/baritone | NO — Java client mod only |
- *
- * Priority for bot.dreamGoto:
- *   1) ashfinder (mineflayer-baritone)
- *   2) prismarine pathfinder (stable)
- *   3) local step/dig/bridge/unstuck always on
+ * Local layer does NOT interrupt pathfinder/actions mid-task.
  */
 
 const AIR = new Set(['air', 'cave_air', 'void_air', 'light']);
@@ -47,6 +36,16 @@ function inWater(bot) {
   }
 }
 
+function isTaskBusy(bot, agent) {
+  try {
+    if (bot._dreamPvpActive) return true;
+    if (agent?.actions?.executing) return true;
+    if (bot.pathfinder?.isMoving?.()) return true;
+    if (bot.targetDigBlock) return true;
+  } catch {}
+  return false;
+}
+
 async function withTimeout(p, ms) {
   let t;
   try {
@@ -61,7 +60,6 @@ async function withTimeout(p, ms) {
   }
 }
 
-/** PrismarineJS mineflayer-pathfinder — max settings */
 function setupPrismarine(bot) {
   try {
     const { Movements } = require('mineflayer-pathfinder');
@@ -88,7 +86,6 @@ function setupPrismarine(bot) {
   }
 }
 
-/** miner-org/mineflayer-baritone */
 async function setupAshfinder(bot) {
   if (bot.ashfinder) {
     configAsh(bot);
@@ -133,35 +130,25 @@ function configAsh(bot) {
   } catch {}
 }
 
-/**
- * @nxg-org/mineflayer-pathfinder (Minecraft-Pathfinding org)
- * HEAVY development — may overwrite bot.pathfinder. We do NOT load by default.
- * Set env DREAM_USE_NXG=1 to experiment (can break Mindcraft collect/goto).
- */
 async function setupNxgOptional(bot) {
   if (process.env.DREAM_USE_NXG !== '1') {
-    console.log('[NAV-STACK] nxg pathfinder OFF (set DREAM_USE_NXG=1 to try experimental)');
+    console.log('[NAV-STACK] nxg OFF');
     return false;
   }
   try {
-    // Backup prismarine reference
     bot._prismarinePathfinder = bot.pathfinder;
     const nxg = await import('@nxg-org/mineflayer-pathfinder');
     const plugin = nxg.default || nxg.pathfinder || nxg.plugin || nxg;
     if (typeof plugin === 'function') {
       plugin(bot);
       bot._nxgPathfinder = bot.pathfinder;
-      // Restore Mindcraft pathfinder as primary
       if (bot._prismarinePathfinder) bot.pathfinder = bot._prismarinePathfinder;
-      console.log('[NAV-STACK] nxg loaded as bot._nxgPathfinder (experimental)');
       return true;
     }
-    console.warn('[NAV-STACK] nxg API unexpected');
-    return false;
   } catch (e) {
     console.warn('[NAV-STACK] nxg skip', (e.message || '').slice(0, 70));
-    return false;
   }
+  return false;
 }
 
 function installDreamGoto(bot) {
@@ -176,18 +163,15 @@ function installDreamGoto(bot) {
   bot.dreamGoto = async (x, y, z, range = 1) => {
     if (!bot.entity) return false;
     if (inWater(bot)) await escapeWater(bot);
-
     const { Vec3 } = require('vec3');
     const target = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
 
-    // 1) ashfinder
     if (bot.ashfinder) {
       try {
         const { goals } = await import('@miner-org/mineflayer-baritone');
         const goal = goals.GoalNear
           ? new goals.GoalNear(target, range)
           : new goals.GoalExact(target);
-        console.log('[NAV-STACK] ashfinder →', target.x, target.y, target.z);
         await withTimeout(bot.ashfinder.goto(goal), 55000);
         return true;
       } catch (e) {
@@ -195,12 +179,12 @@ function installDreamGoto(bot) {
       }
     }
 
-    // 2) prismarine
     try {
       const { goals } = require('mineflayer-pathfinder');
-      const goal = new goals.GoalNear(target.x, target.y, target.z, range);
-      console.log('[NAV-STACK] prismarine →', target.x, target.y, target.z);
-      await withTimeout(bot.pathfinder.goto(goal), 40000);
+      await withTimeout(
+        bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, range)),
+        40000
+      );
       return true;
     } catch (e) {
       console.warn('[NAV-STACK] prismarine fail', (e.message || '').slice(0, 40));
@@ -227,45 +211,19 @@ async function escapeWater(bot) {
     await new Promise(r => setTimeout(r, 180));
   }
   bot.clearControlStates();
-  // swim to nearest shore
-  const pos = bot.entity.position;
-  let best = null;
-  let bestD = 99;
-  for (let dx = -10; dx <= 10; dx++) {
-    for (let dz = -10; dz <= 10; dz++) {
-      for (let dy = -1; dy <= 3; dy++) {
-        const p = pos.offset(dx, dy, dz);
-        const b = bot.blockAt(p);
-        const a1 = bot.blockAt(p.offset(0, 1, 0));
-        if (solid(b) && !solid(a1) && !isWater(a1)) {
-          const d = Math.abs(dx) + Math.abs(dz);
-          if (d > 0 && d < bestD) {
-            bestD = d;
-            best = p.offset(0, 1, 0);
-          }
-        }
-      }
-    }
-  }
-  if (best) {
-    for (let i = 0; i < 30 && inWater(bot); i++) {
-      try { await bot.lookAt(best, true); } catch {}
-      bot.setControlState('jump', true);
-      bot.setControlState('forward', true);
-      await new Promise(r => setTimeout(r, 120));
-    }
-    bot.clearControlStates();
-  }
   return !inWater(bot);
 }
 
-function startLocalLayer(bot) {
+function startLocalLayer(bot, agent) {
   if (bot._dreamNavLocal) return;
   bot._dreamNavLocal = true;
   let busy = false;
 
   setInterval(async () => {
-    if (busy || !bot.entity || bot._dreamPvpActive) return;
+    if (busy || !bot.entity) return;
+    // NEVER interrupt a running task / path / dig
+    if (isTaskBusy(bot, agent)) return;
+
     if (inWater(bot)) {
       busy = true;
       try { await escapeWater(bot); } finally { busy = false; }
@@ -291,7 +249,6 @@ function startLocalLayer(bot) {
         return;
       }
       if (solid(ff) && solid(fh)) {
-        bot.dreamStopNav();
         for (const blk of [fh, ff]) {
           if (diggable(blk)) {
             try { await withTimeout(bot.dig(blk), 4000); } catch { try { bot.stopDigging(); } catch {} }
@@ -319,10 +276,10 @@ function startLocalLayer(bot) {
       busy = false;
     }
   }, 1200);
-  console.log('[NAV-STACK] local layer ON');
+  console.log('[NAV-STACK] local layer ON (respects tasks)');
 }
 
-function startPassiveGoto(bot) {
+function startPassiveGoto(bot, agent) {
   if (bot._dreamPassiveGoto) return;
   bot._dreamPassiveGoto = true;
   let run = false;
@@ -346,9 +303,9 @@ function startPassiveGoto(bot) {
   };
 
   setInterval(async () => {
-    if (run || !bot.entity || bot._dreamPvpActive) return;
+    if (run || !bot.entity) return;
+    if (isTaskBusy(bot, agent)) return;
     if (inWater(bot)) return;
-    if (bot.pathfinder?.isMoving?.()) return;
     run = true;
     try {
       const inv = bot.inventory.items();
@@ -381,7 +338,7 @@ function startPassiveGoto(bot) {
       run = false;
     }
   }, 16000);
-  console.log('[NAV-STACK] passive resource goto ON');
+  console.log('[NAV-STACK] passive goto ON');
 }
 
 export async function startNavStack(agent) {
@@ -389,16 +346,16 @@ export async function startNavStack(agent) {
   if (!bot) return;
 
   setupPrismarine(bot);
-  const ash = await setupAshfinder(bot);
+  await setupAshfinder(bot);
   await setupNxgOptional(bot);
   installDreamGoto(bot);
 
   const boot = () => {
     setupPrismarine(bot);
     if (bot.ashfinder) configAsh(bot);
-    startLocalLayer(bot);
-    startPassiveGoto(bot);
-    console.log('[NAV-STACK] READY | prismarine=YES ashfinder=' + !!bot.ashfinder + ' baritone-java=NO nxg=' + !!bot._nxgPathfinder);
+    startLocalLayer(bot, agent);
+    startPassiveGoto(bot, agent);
+    console.log('[NAV-STACK] READY (tasks respected)');
   };
 
   if (bot.entity) boot();
@@ -406,7 +363,6 @@ export async function startNavStack(agent) {
   bot.on('respawn', () => setTimeout(boot, 800));
 }
 
-// Back-compat alias used by post-wire
 export async function startBaritoneNav(agent) {
   return startNavStack(agent);
 }
