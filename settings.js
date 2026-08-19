@@ -13,8 +13,8 @@ const settings = {
     speak: false,
     chat_ingame: true,
     language: "pt",
-    // UI iframe uses /viewer (proxied) — works on mobile after patch-ui-viewer
-    render_bot_view: true,
+    // iframe 3D broken on Railway (no canvas) — open /viewer for live text view
+    render_bot_view: false,
     show_bot_views: false,
     allow_insecure_coding: false,
     allow_vision: true,
