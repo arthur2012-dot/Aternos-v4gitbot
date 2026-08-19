@@ -40,7 +40,7 @@
     },
     "scripts": {
         "postinstall": "echo '[postinstall] ok'",
-        "prestart": "node scripts/fetch-base.js && node scripts/post-fetch-wire.js && node scripts/patch-security.js && node scripts/patch-ai-nonblock.js && node scripts/fix-agent-syntax.js",
+        "prestart": "node scripts/fetch-base.js && node scripts/post-fetch-wire.js && node scripts/patch-mindserver.js && node scripts/patch-security.js && node scripts/patch-ai-nonblock.js && node scripts/fix-agent-syntax.js",
         "start": "node main.js"
     }
 }
