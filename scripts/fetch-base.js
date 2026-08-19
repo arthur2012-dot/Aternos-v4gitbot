@@ -1,6 +1,5 @@
 /**
- * DreamBot — Mindcraft base + crash fixes + aggressive local NAV
- * Fixes: prompt.replaceAll TypeError, stuck against walls, freeze on dig
+ * DreamBot — Mindcraft base + crash fixes + NAV + OSRS-inspired PvP
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -73,31 +72,26 @@ function refresh() {
 }
 
 function applyFixes() {
-  // ===== CRITICAL: prompter replaceAll crash =====
-  // TypeError: prompt.replaceAll is not a function when prompt is not a string
   try {
     let prompter = read('src/models/prompter.js');
     if (!prompter.includes('[DreamBot] safeReplace')) {
-      // Inject safe helper near top of class usage / before replaceStrings
       if (prompter.includes('async replaceStrings')) {
         prompter = prompter.replace(
           /async replaceStrings\s*\(/,
-          `// [DreamBot] safeReplace — never call replaceAll on non-string
+          `// [DreamBot] safeReplace
     _safeReplaceAll(str, search, repl) {
         const s = (str == null) ? '' : String(str);
         if (typeof s.replaceAll === 'function') {
             try { return s.replaceAll(search, repl); } catch {}
         }
-        const esc = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const esc = String(search).replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
         return s.replace(new RegExp(esc, 'g'), repl == null ? '' : String(repl));
     }
 
     async replaceStrings(`
         );
-        // Replace all prompt.replaceAll( with this._safeReplaceAll(prompt,
         prompter = prompter.replace(/prompt\s*=\s*prompt\.replaceAll\(/g, 'prompt = this._safeReplaceAll(prompt, ');
-        // Also fix other .replaceAll on possibly non-strings in that function if any pattern like stats.replaceAll
-        console.log('[fetch-base] prompter: safeReplace for replaceAll');
+        console.log('[fetch-base] prompter: safeReplace');
       }
       write('src/models/prompter.js', prompter);
     }
@@ -116,26 +110,12 @@ function applyFixes() {
     `console.warn('[DreamBot] stuck — stay online')`
   );
   if (!modes.includes('[DreamBot] soft interrupt')) {
-    modes = modes.replace(
-      /(name:\s*['"]unstuck['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
-      `$1false /* [DreamBot] soft interrupt */`
-    );
-    modes = modes.replace(
-      /(name:\s*['"]hunting['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
-      `$1false /* [DreamBot] soft interrupt */`
-    );
-    modes = modes.replace(
-      /(name:\s*['"]item_collecting['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
-      `$1false /* [DreamBot] soft interrupt */`
-    );
-    modes = modes.replace(
-      /(name:\s*['"]torch_placing['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
-      `$1false /* [DreamBot] soft interrupt */`
-    );
-    modes = modes.replace(
-      /(name:\s*['"]elbow_room['"][\s\S]*?interrupt:\s*)(agent\s*=>\s*[^,\n]+)/,
-      `$1false /* [DreamBot] soft interrupt */`
-    );
+    for (const name of ['unstuck', 'hunting', 'item_collecting', 'torch_placing', 'elbow_room']) {
+      modes = modes.replace(
+        new RegExp(`(name:\\s*['\"]${name}['\"][\\s\\S]*?interrupt:\\s*)(agent\\s*=>\\s*[^,\\n]+)`),
+        `$1false /* [DreamBot] soft interrupt */`
+      );
+    }
     console.log('[fetch-base] soft interrupts');
   }
   write('src/agent/modes.js', modes);
@@ -150,13 +130,8 @@ function applyFixes() {
           const Movements = pf.Movements || pf.default?.Movements;
           if (Movements && bot.pathfinder) {
             const m = new Movements(bot);
-            m.canDig = true;
-            m.allowSprinting = true;
-            m.allowParkour = true;
-            m.allow1by1towers = true;
-            m.maxDropDown = 4;
-            m.digCost = 1;
-            m.placeCost = 1;
+            m.canDig = true; m.allowSprinting = true; m.allowParkour = true;
+            m.allow1by1towers = true; m.maxDropDown = 4; m.digCost = 1; m.placeCost = 1;
             try { m.canOpenDoors = true; } catch {}
             bot.pathfinder.setMovements(m);
           }
@@ -186,6 +161,9 @@ function applyFixes() {
     );
   }
   write('src/agent/library/skills.js', skills);
+
+  // Always copy PvP module into agent tree
+  copyStub('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 
   let agent = read('src/agent/agent.js');
   if (agent.includes('Hello world! I am')) {
@@ -222,13 +200,43 @@ function applyFixes() {
     );
   }
 
+  // Inject PvP on any spawn handler (even if NAV already injected)
+  if (!agent.includes('[DreamBot] PVP COMBAT')) {
+    // Prefer after pathfinder log if NAV present
+    if (agent.includes("[DreamBot] pathfinder dig+parkour+sprint")) {
+      agent = agent.replace(
+        `console.log('[DreamBot] pathfinder dig+parkour+sprint');`,
+        `console.log('[DreamBot] pathfinder dig+parkour+sprint');
+            // [DreamBot] PVP COMBAT — OSRS RL inspired (defensive)
+            try {
+                const { startPvpCombat } = await import('./pvp-combat.js');
+                startPvpCombat(this);
+            } catch (e) { console.warn('[DreamBot] pvp load', e.message); }`
+      );
+    } else {
+      // Fallback: inject at start of spawn
+      agent = agent.replace(
+        /this\.bot\.once\('spawn', async \(\) => \{\s*try \{\s*clearTimeout\(spawnTimeout\);/,
+        `this.bot.once('spawn', async () => {
+            try { clearTimeout(spawnTimeout); } catch {}
+            // [DreamBot] PVP COMBAT
+            try {
+                const { startPvpCombat } = await import('./pvp-combat.js');
+                startPvpCombat(this);
+            } catch (e) { console.warn('[DreamBot] pvp load', e.message); }
+            try { if (false) clearTimeout(spawnTimeout);`
+      );
+    }
+    console.log('[fetch-base] PVP combat wired');
+  }
+
   if (!agent.includes('[DreamBot] NAV BRAIN v2')) {
     agent = agent.replace(
       /this\.bot\.once\('spawn', async \(\) => \{\s*try \{\s*clearTimeout\(spawnTimeout\);/,
       `this.bot.once('spawn', async () => {
             try { clearTimeout(spawnTimeout); } catch {}
 
-            // [DreamBot] NAV BRAIN v2 — aggressive dig/jump/around, cancel path when stuck on block
+            // [DreamBot] NAV BRAIN v2
             this._dreamLock = false;
             this._dreamLockUntil = 0;
             this._navBusy = false;
@@ -266,84 +274,49 @@ function applyFixes() {
                 const Movements = pf.Movements || pf.default?.Movements;
                 if (Movements) {
                     const m = new Movements(this.bot);
-                    m.canDig = true;
-                    m.allowSprinting = true;
-                    m.allowParkour = true;
-                    m.allow1by1towers = true;
-                    m.maxDropDown = 4;
-                    m.digCost = 1;
-                    m.placeCost = 1;
+                    m.canDig = true; m.allowSprinting = true; m.allowParkour = true;
+                    m.allow1by1towers = true; m.maxDropDown = 4; m.digCost = 1; m.placeCost = 1;
                     try { m.canOpenDoors = true; } catch {}
                     this.bot.pathfinder.setMovements(m);
                     console.log('[DreamBot] pathfinder dig+parkour+sprint');
                 }
             } catch (e) { console.warn('[DreamBot] pf', e.message); }
 
+            // [DreamBot] PVP COMBAT
+            try {
+                const { startPvpCombat } = await import('./pvp-combat.js');
+                startPvpCombat(this);
+            } catch (e) { console.warn('[DreamBot] pvp load', e.message); }
+
             try {
                 if (!this._homePos && this.bot.entity) this._homePos = this.bot.entity.position.clone();
             } catch {}
 
-            // Aggressive local NAV every 1s — works while pathing (cancels path if wall-stuck)
             setInterval(async () => {
                 if (this._navBusy) return;
                 try {
                     const bot = this.bot;
                     if (!bot?.entity) return;
                     if (this._dreamLock && Date.now() < (this._dreamLockUntil || 0) - 4000) return;
-
                     this._navBusy = true;
                     let Vec3;
-                    try {
-                        const v = await import('vec3');
-                        Vec3 = v.default || v.Vec3;
-                    } catch { this._navBusy = false; return; }
-
-                    const solid = (b) => b && b.boundingBox === 'block'
-                        && b.name !== 'air' && b.name !== 'cave_air' && b.name !== 'void_air'
-                        && !String(b.name).includes('water') && !String(b.name).includes('lava');
-                    const air = (b) => !b || b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air'
-                        || b.boundingBox === 'empty';
-
+                    try { const v = await import('vec3'); Vec3 = v.default || v.Vec3; } catch { this._navBusy = false; return; }
+                    const solid = (b) => b && b.boundingBox === 'block' && b.name !== 'air' && b.name !== 'cave_air' && b.name !== 'void_air' && !String(b.name).includes('water') && !String(b.name).includes('lava');
+                    const air = (b) => !b || b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air' || b.boundingBox === 'empty';
                     const pos = bot.entity.position;
                     const yaw = bot.entity.yaw;
                     const fwd = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
                     const left = { x: Math.cos(yaw), z: -Math.sin(yaw) };
                     const right = { x: -Math.cos(yaw), z: Math.sin(yaw) };
-
-                    const at = (ox, oy, oz) => {
-                        try {
-                            return bot.blockAt(new Vec3(
-                                Math.floor(pos.x + ox),
-                                Math.floor(pos.y + oy),
-                                Math.floor(pos.z + oz)
-                            ));
-                        } catch { return null; }
-                    };
+                    const at = (ox, oy, oz) => { try { return bot.blockAt(new Vec3(Math.floor(pos.x + ox), Math.floor(pos.y + oy), Math.floor(pos.z + oz))); } catch { return null; } };
                     const dirAt = (dir, dist, oy) => at(dir.x * dist, oy, dir.z * dist);
+                    const fFeet = dirAt(fwd, 1, 0), fHead = dirAt(fwd, 1, 1), fAbove = dirAt(fwd, 1, 2), fDown = dirAt(fwd, 1, -1);
+                    const f2Feet = dirAt(fwd, 2, 0), f2Head = dirAt(fwd, 2, 1);
+                    const lFeet = dirAt(left, 1, 0), lHead = dirAt(left, 1, 1), rFeet = dirAt(right, 1, 0), rHead = dirAt(right, 1, 1);
+                    const below = at(0, -1, 0), aboveHead = at(0, 2, 0);
+                    const placeable = () => bot.inventory.items().find(i => /dirt|cobblestone|planks|netherrack|stone$|andesite|granite|diorite|deepslate|tuff|mossy/.test(i.name));
+                    const finish = (ms = 0) => { if (ms <= 0) { this._navBusy = false; return; } setTimeout(() => { try { clearControls(); } catch {} this._navBusy = false; }, ms); };
 
-                    const fFeet = dirAt(fwd, 1, 0);
-                    const fHead = dirAt(fwd, 1, 1);
-                    const fAbove = dirAt(fwd, 1, 2);
-                    const fDown = dirAt(fwd, 1, -1);
-                    const f2Feet = dirAt(fwd, 2, 0);
-                    const f2Head = dirAt(fwd, 2, 1);
-                    const lFeet = dirAt(left, 1, 0);
-                    const lHead = dirAt(left, 1, 1);
-                    const rFeet = dirAt(right, 1, 0);
-                    const rHead = dirAt(right, 1, 1);
-                    const below = at(0, -1, 0);
-                    const aboveHead = at(0, 2, 0);
-
-                    const placeable = () => bot.inventory.items().find(i =>
-                        /dirt|cobblestone|planks|netherrack|stone$|andesite|granite|diorite|deepslate|tuff|mossy/.test(i.name)
-                    );
-
-                    const finish = (ms = 0) => {
-                        if (ms <= 0) { this._navBusy = false; return; }
-                        setTimeout(() => { try { clearControls(); } catch {} this._navBusy = false; }, ms);
-                    };
-
-                    // 1) No floor
                     if (air(below)) {
                         stopPath();
                         const p = placeable();
@@ -353,233 +326,92 @@ function applyFixes() {
                                 for (const d of [fwd, left, right, { x: 0, z: 0 }]) {
                                     const ref = at(d.x, -1, d.z);
                                     if (solid(ref)) {
-                                        await Promise.race([
-                                            bot.placeBlock(ref, new Vec3(0, 1, 0)),
-                                            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500))
-                                        ]);
-                                        console.log('[DreamBot] NAV floor');
-                                        finish(200);
-                                        return;
+                                        await Promise.race([bot.placeBlock(ref, new Vec3(0, 1, 0)), new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 1500))]);
+                                        finish(200); return;
                                     }
                                 }
                             } catch {}
                         }
-                        bot.setControlState('jump', true);
-                        bot.setControlState('back', true);
-                        finish(400);
-                        console.log('[DreamBot] NAV edge');
-                        return;
+                        bot.setControlState('jump', true); bot.setControlState('back', true); finish(400); return;
                     }
-
-                    // 2) Gap → bridge or jump or turn
                     if (air(fDown) && air(fFeet)) {
                         stopPath();
                         const p = placeable();
                         if (p && solid(below)) {
                             try {
                                 await bot.equip(p, 'hand');
-                                const face = new Vec3(
-                                    Math.abs(fwd.x) > Math.abs(fwd.z) ? (fwd.x > 0 ? 1 : -1) : 0,
-                                    0,
-                                    Math.abs(fwd.z) >= Math.abs(fwd.x) ? (fwd.z > 0 ? 1 : -1) : 0
-                                );
-                                await Promise.race([
-                                    bot.placeBlock(below, face.x || face.z ? face : new Vec3(1, 0, 0)),
-                                    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500))
-                                ]);
-                                console.log('[DreamBot] NAV bridge');
-                                bot.setControlState('forward', true);
-                                finish(350);
-                                return;
+                                const face = new Vec3(Math.abs(fwd.x) > Math.abs(fwd.z) ? (fwd.x > 0 ? 1 : -1) : 0, 0, Math.abs(fwd.z) >= Math.abs(fwd.x) ? (fwd.z > 0 ? 1 : -1) : 0);
+                                await Promise.race([bot.placeBlock(below, face.x || face.z ? face : new Vec3(1, 0, 0)), new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 1500))]);
+                                bot.setControlState('forward', true); finish(350); return;
                             } catch {}
                         }
                         const f2Down = dirAt(fwd, 2, -1);
                         if (solid(f2Down) && air(f2Feet)) {
-                            bot.setControlState('sprint', true);
-                            bot.setControlState('forward', true);
-                            bot.setControlState('jump', true);
-                            finish(450);
-                            console.log('[DreamBot] NAV gap jump');
-                            return;
+                            bot.setControlState('sprint', true); bot.setControlState('forward', true); bot.setControlState('jump', true); finish(450); return;
                         }
-                        bot.look(yaw + 1.3, 0);
-                        bot.setControlState('forward', true);
-                        finish(400);
-                        console.log('[DreamBot] NAV avoid gap');
-                        return;
+                        bot.look(yaw + 1.3, 0); bot.setControlState('forward', true); finish(400); return;
                     }
-
-                    // 3) Step up 1 block
                     if (solid(fFeet) && air(fHead) && air(fAbove)) {
                         stopPath();
-                        bot.setControlState('jump', true);
-                        bot.setControlState('forward', true);
-                        bot.setControlState('sprint', true);
-                        finish(450);
-                        console.log('[DreamBot] NAV jump step', fFeet?.name);
-                        return;
+                        bot.setControlState('jump', true); bot.setControlState('forward', true); bot.setControlState('sprint', true); finish(450); return;
                     }
-
-                    // 4) Wall ahead — ALWAYS stop pathfinder first so we don't freeze hitting the block
                     if (solid(fHead) || (solid(fFeet) && solid(fHead))) {
                         stopPath();
-                        const leftFree = air(lFeet) && air(lHead);
-                        const rightFree = air(rFeet) && air(rHead);
-
-                        if (leftFree && !rightFree) {
-                            bot.look(yaw + Math.PI / 2, 0);
-                            bot.setControlState('forward', true);
-                            bot.setControlState('sprint', true);
-                            finish(550);
-                            console.log('[DreamBot] NAV left');
-                            return;
-                        }
-                        if (rightFree && !leftFree) {
-                            bot.look(yaw - Math.PI / 2, 0);
-                            bot.setControlState('forward', true);
-                            bot.setControlState('sprint', true);
-                            finish(550);
-                            console.log('[DreamBot] NAV right');
-                            return;
-                        }
-                        if (leftFree && rightFree) {
-                            bot.look(yaw + (Math.random() > 0.5 ? Math.PI / 2 : -Math.PI / 2), 0);
-                            bot.setControlState('forward', true);
-                            bot.setControlState('sprint', true);
-                            finish(500);
-                            console.log('[DreamBot] NAV around');
-                            return;
-                        }
-
-                        // Dig with timeout so dig never freezes the bot forever
+                        const leftFree = air(lFeet) && air(lHead), rightFree = air(rFeet) && air(rHead);
+                        if (leftFree && !rightFree) { bot.look(yaw + Math.PI / 2, 0); bot.setControlState('forward', true); bot.setControlState('sprint', true); finish(550); return; }
+                        if (rightFree && !leftFree) { bot.look(yaw - Math.PI / 2, 0); bot.setControlState('forward', true); bot.setControlState('sprint', true); finish(550); return; }
+                        if (leftFree && rightFree) { bot.look(yaw + (Math.random() > 0.5 ? Math.PI / 2 : -Math.PI / 2), 0); bot.setControlState('forward', true); bot.setControlState('sprint', true); finish(500); return; }
                         const digSafe = async (block) => {
                             if (!block || !solid(block)) return;
                             try {
-                                await Promise.race([
-                                    bot.dig(block),
-                                    new Promise((_, rej) => setTimeout(() => rej(new Error('dig timeout')), 4000))
-                                ]);
-                                console.log('[DreamBot] NAV dig', block.name);
-                            } catch (e) {
-                                console.warn('[DreamBot] dig fail', e.message);
-                                try { bot.stopDigging?.(); } catch {}
-                            }
+                                await Promise.race([bot.dig(block), new Promise((_, rej) => setTimeout(() => rej(new Error('dig timeout')), 4000))]);
+                            } catch { try { bot.stopDigging?.(); } catch {} }
                         };
                         if (solid(fHead)) await digSafe(fHead);
                         if (solid(fFeet)) await digSafe(fFeet);
-                        // after dig, push forward briefly
-                        bot.setControlState('forward', true);
-                        bot.setControlState('sprint', true);
-                        finish(400);
-                        return;
+                        bot.setControlState('forward', true); bot.setControlState('sprint', true); finish(400); return;
                     }
-
-                    // 5) Ceiling
                     if (solid(aboveHead)) {
                         stopPath();
-                        try {
-                            await Promise.race([
-                                bot.dig(aboveHead),
-                                new Promise((_, rej) => setTimeout(() => rej(new Error('dig timeout')), 4000))
-                            ]);
-                            console.log('[DreamBot] NAV ceiling');
-                        } catch { try { bot.stopDigging?.(); } catch {} }
-                        finish(200);
-                        return;
+                        try { await Promise.race([bot.dig(aboveHead), new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 4000))]); } catch { try { bot.stopDigging?.(); } catch {} }
+                        finish(200); return;
                     }
-
-                    // 6) Obstacle 2 blocks ahead → early turn
                     if (solid(f2Feet) && solid(f2Head)) {
-                        const lf = air(lFeet) && air(lHead);
-                        const rf = air(rFeet) && air(rHead);
-                        if (lf || rf) {
-                            stopPath();
-                            bot.look(yaw + (lf ? Math.PI / 3 : -Math.PI / 3), 0);
-                            bot.setControlState('forward', true);
-                            finish(400);
-                            console.log('[DreamBot] NAV early turn');
-                            return;
-                        }
+                        const lf = air(lFeet) && air(lHead), rf = air(rFeet) && air(rHead);
+                        if (lf || rf) { stopPath(); bot.look(yaw + (lf ? Math.PI / 3 : -Math.PI / 3), 0); bot.setControlState('forward', true); finish(400); return; }
                     }
-
                     this._navBusy = false;
-                } catch (e) {
-                    try { clearControls(); } catch {}
-                    this._navBusy = false;
-                }
+                } catch (e) { try { clearControls(); } catch {} this._navBusy = false; }
             }, 1000);
 
-            // Stuck detector — stronger escape, always cancel path
-            let still = 0;
-            let lastP = null;
+            let still = 0, lastP = null;
             setInterval(async () => {
                 try {
                     const bot = this.bot;
-                    if (!bot?.entity) return;
-                    if (this._navBusy) return;
+                    if (!bot?.entity || this._navBusy) return;
                     const p = bot.entity.position;
-                    if (lastP && p.distanceTo(lastP) < 0.1) still++;
-                    else still = 0;
+                    if (lastP && p.distanceTo(lastP) < 0.1) still++; else still = 0;
                     lastP = p.clone();
-                    if (still < 4) return; // ~6s stuck
-                    still = 0;
-                    this._navBusy = true;
-                    console.log('[DreamBot] NAV STUCK escape');
-                    stopPath();
-                    clearControls();
-
-                    let Vec3;
-                    try {
-                        const v = await import('vec3');
-                        Vec3 = v.default || v.Vec3;
-                    } catch {}
-
+                    if (still < 4) return;
+                    still = 0; this._navBusy = true; stopPath(); clearControls();
+                    let Vec3; try { const v = await import('vec3'); Vec3 = v.default || v.Vec3; } catch {}
                     if (Vec3) {
-                        for (const [ox, oy, oz] of [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[1,1,0],[-1,1,0],[0,1,1],[0,1,-1],[0,2,0],[0,0,0]]) {
+                        for (const [ox, oy, oz] of [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[1,1,0],[-1,1,0],[0,1,1],[0,1,-1],[0,2,0]]) {
                             try {
                                 const b = bot.blockAt(bot.entity.position.offset(ox, oy, oz));
                                 if (b && b.boundingBox === 'block' && b.name !== 'air') {
-                                    await Promise.race([
-                                        bot.dig(b),
-                                        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3500))
-                                    ]);
-                                    console.log('[DreamBot] NAV dig out', b.name);
+                                    await Promise.race([bot.dig(b), new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 3500))]);
                                     break;
                                 }
                             } catch { try { bot.stopDigging?.(); } catch {} }
                         }
                     }
-
-                    const pl = bot.inventory.items().find(i => /dirt|cobblestone|planks|stone$/.test(i.name));
-                    if (pl && Vec3) {
-                        try {
-                            await bot.equip(pl, 'hand');
-                            const bel = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-                            if (bel) {
-                                bot.setControlState('jump', true);
-                                await new Promise(r => setTimeout(r, 180));
-                                try { await bot.placeBlock(bel, new Vec3(0, 1, 0)); } catch {}
-                                bot.setControlState('jump', false);
-                                console.log('[DreamBot] NAV pillar');
-                            }
-                        } catch {}
-                    }
-
                     bot.look(bot.entity.yaw + Math.PI * 0.7, 0);
-                    bot.setControlState('jump', true);
-                    bot.setControlState('forward', true);
-                    bot.setControlState('sprint', true);
-                    setTimeout(() => {
-                        clearControls();
-                        this._navBusy = false;
-                    }, 800);
-                } catch {
-                    try { clearControls(); } catch {}
-                    this._navBusy = false;
-                }
+                    bot.setControlState('jump', true); bot.setControlState('forward', true); bot.setControlState('sprint', true);
+                    setTimeout(() => { clearControls(); this._navBusy = false; }, 800);
+                } catch { try { clearControls(); } catch {} this._navBusy = false; }
             }, 1500);
 
-            // PASSIVE survival progression
             setInterval(async () => {
                 try {
                     if (dreamBusy() || this._navBusy || isPathing() || isActing()) return;
@@ -595,82 +427,35 @@ function applyFixes() {
                     const planks = inv().filter(i => /_planks$/.test(i.name)).reduce((a, i) => a + i.count, 0);
                     const sticks = count('stick');
                     const cobble = count('cobblestone') + count('stone');
-                    const hasTable = has('crafting_table');
                     const hasPick = inv().some(i => /pickaxe/.test(i.name));
                     const done = () => dreamRelease();
-
                     if (bot.food < 16) {
                         const food = inv().find(i => /cooked_|bread|apple|carrot|potato|beef|pork|chicken|mutton/.test(i.name));
-                        if (food) {
-                            try { await bot.equip(food, 'hand'); await bot.consume(); console.log('[DreamBot] eat'); done(); return; } catch {}
-                        }
+                        if (food) { try { await bot.equip(food, 'hand'); await bot.consume(); done(); return; } catch {} }
                     }
                     if (logs < 8) {
                         for (const k of ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log']) {
-                            try { if (await skills.collectBlock(bot, k, 4)) { console.log('[DreamBot] wood', k); done(); return; } } catch {}
-                        }
-                        const log = bot.findBlock({ matching: b => b && /_log$/.test(b.name), maxDistance: 16 });
-                        if (log) {
-                            try {
-                                if (log.position.distanceTo(bot.entity.position) > 3) {
-                                    try { await skills.goToPosition(bot, log.position.x, log.position.y, log.position.z, 2); } catch {}
-                                }
-                                await Promise.race([
-                                    bot.dig(log),
-                                    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))
-                                ]);
-                                console.log('[DreamBot] dig log');
-                                done(); return;
-                            } catch { try { bot.stopDigging?.(); } catch {} }
+                            try { if (await skills.collectBlock(bot, k, 4)) { done(); return; } } catch {}
                         }
                     }
                     if (logs >= 1 && planks < 12) {
-                        try {
-                            const w = inv().find(i => /_log$/.test(i.name));
-                            if (w) { await skills.craftRecipe(bot, w.name.replace('_log', '_planks'), 2); console.log('[DreamBot] planks'); done(); return; }
-                        } catch (e) { console.warn('[DreamBot] planks', e.message); }
+                        try { const w = inv().find(i => /_log$/.test(i.name)); if (w) { await skills.craftRecipe(bot, w.name.replace('_log', '_planks'), 2); done(); return; } } catch {}
                     }
-                    if (!hasTable && planks >= 4) {
-                        try { await skills.craftRecipe(bot, 'crafting_table', 1); console.log('[DreamBot] table'); done(); return; } catch {}
-                    }
-                    if (sticks < 6 && planks >= 2) {
-                        try { await skills.craftRecipe(bot, 'stick', 4); done(); return; } catch {}
-                    }
+                    if (!has('crafting_table') && planks >= 4) { try { await skills.craftRecipe(bot, 'crafting_table', 1); done(); return; } catch {} }
+                    if (sticks < 6 && planks >= 2) { try { await skills.craftRecipe(bot, 'stick', 4); done(); return; } catch {} }
                     if (!hasPick && planks >= 3 && sticks >= 2) {
-                        try {
-                            await skills.craftRecipe(bot, 'wooden_pickaxe', 1);
-                            await skills.equip(bot, 'wooden_pickaxe');
-                            console.log('[DreamBot] wooden pickaxe'); done(); return;
-                        } catch {}
+                        try { await skills.craftRecipe(bot, 'wooden_pickaxe', 1); await skills.equip(bot, 'wooden_pickaxe'); done(); return; } catch {}
                     }
-                    if (hasPick && cobble < 16) {
-                        try { if (await skills.collectBlock(bot, 'stone', 6)) { console.log('[DreamBot] stone'); done(); return; } } catch {}
-                    }
+                    if (hasPick && cobble < 16) { try { if (await skills.collectBlock(bot, 'stone', 6)) { done(); return; } } catch {} }
                     if (cobble >= 3 && sticks >= 2 && !has('stone_pickaxe')) {
-                        try {
-                            await skills.craftRecipe(bot, 'stone_pickaxe', 1);
-                            await skills.equip(bot, 'stone_pickaxe');
-                            console.log('[DreamBot] stone pickaxe'); done(); return;
-                        } catch {}
+                        try { await skills.craftRecipe(bot, 'stone_pickaxe', 1); await skills.equip(bot, 'stone_pickaxe'); done(); return; } catch {}
                     }
-                    if (bot.food < 15) {
-                        for (const mob of ['chicken','cow','pig','sheep']) {
-                            try { if (await skills.attackNearest(bot, mob, true)) { console.log('[DreamBot] hunt'); done(); return; } } catch {}
-                        }
-                    }
-                    try { await skills.moveAway(bot, 10); console.log('[DreamBot] explore'); }
-                    catch {
-                        bot.setControlState('forward', true);
-                        bot.setControlState('sprint', true);
-                        setTimeout(() => {
-                            try { bot.setControlState('forward', false); bot.setControlState('sprint', false); bot.look(bot.entity.yaw + 0.7, 0); } catch {}
-                        }, 500);
+                    try { await skills.moveAway(bot, 10); } catch {
+                        bot.setControlState('forward', true); bot.setControlState('sprint', true);
+                        setTimeout(() => { try { bot.setControlState('forward', false); bot.setControlState('sprint', false); } catch {} }, 500);
                     }
                     done();
-                } catch (e) {
-                    if (!/PathStopped/i.test(String(e?.message || e))) console.warn('[DreamBot] passive', e.message);
-                    try { this._dreamLock = false; } catch {}
-                }
+                } catch (e) { try { this._dreamLock = false; } catch {} }
             }, 14000);
 
             setInterval(() => {
@@ -711,7 +496,7 @@ function applyFixes() {
     write('src/utils/mcdata.js', mc);
   }
 
-  console.log('[fetch-base] replaceAll fix + NAV v2 applied');
+  console.log('[fetch-base] NAV + PVP (OSRS-RL) applied');
 }
 
 try {
@@ -753,9 +538,10 @@ export class Camera extends EventEmitter {
   copyStub('stubs/math.js', 'src/utils/math.js');
   copyStub('stubs/examples.js', 'src/utils/examples.js');
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
+  copyStub('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
   const ms = join(ROOT, 'scripts', 'patch-mindserver.js');
   if (existsSync(ms)) { try { run(`node "${ms}"`); } catch {} }
-  console.log('[fetch-base] Ready — replaceAll fixed + NAV dig timeout');
+  console.log('[fetch-base] Ready — NAV + OSRS-inspired PvP');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);
