@@ -1,6 +1,6 @@
 /**
  * PASSIVE BRAIN — pure code, no LLM.
- * Above Altera Builder Bot + path toward beating the game (diamonds).
+ * Emergency food when dying (1 HP / 0 hunger) — does NOT wait for Groq.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -10,8 +10,9 @@ const { goals } = pathfinder;
 const Vec3 = require('vec3').Vec3;
 
 const WOOD = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log','pale_oak_log'];
-const FOOD_RE = /cooked_|bread|apple|carrot|potato|beef|pork|chicken|mutton|cod|salmon|melon|sweet_berries|glow_berries/;
+const FOOD_RE = /cooked_|bread|apple|carrot|potato|beef|pork|chicken|mutton|cod|salmon|melon|sweet_berries|glow_berries|cookie|pie|stew|mushroom_stew|rabbit|tropical_fish/;
 const BUILD_RE = /dirt|cobblestone|netherrack|planks|stone$|andesite|granite|diorite|tuff|deepslate/;
+const FOOD_MOB = /cow|pig|chicken|sheep|rabbit|cod|salmon/;
 
 const craftCooldown = new Map();
 
@@ -47,7 +48,7 @@ function clearToolCraftCooldown() {
 async function goto(bot, x, y, z, r = 1) {
   try {
     if (typeof bot.dreamGoto === 'function') return await bot.dreamGoto(x, y, z, r);
-    await race(bot.pathfinder.goto(new goals.GoalNear(x, y, z, r)), 20000);
+    await race(bot.pathfinder.goto(new goals.GoalNear(x, y, z, r)), 15000);
     return true;
   } catch { return false; }
 }
@@ -63,7 +64,7 @@ async function dig(bot, block) {
       inv.find(i => /_pickaxe$/.test(i.name));
     if (tool) { try { await bot.equip(tool, 'hand'); } catch {} }
     await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
-    await race(bot.dig(block), 12000);
+    await race(bot.dig(block), 10000);
     return true;
   } catch {
     try { bot.stopDigging(); } catch {}
@@ -156,6 +157,94 @@ async function collect(bot, names, need, dist = 36) {
   return got > 0;
 }
 
+/** Eat ANY edible in inventory — critical path */
+async function eatIfNeeded(bot) {
+  // always try if hungry or low HP
+  if (bot.food >= 18 && bot.health >= 16) return false;
+  const food = items(bot).find(i => FOOD_RE.test(i.name));
+  if (!food) return false;
+  try {
+    await bot.equip(food, 'hand');
+    await race(bot.consume(), 5000);
+    console.log('[PASSIVE] EAT', food.name, 'hp', bot.health, 'food', bot.food);
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * EMERGENCY: hunt animals / berries / apples when starving or near death.
+ * Runs even when Groq is dead (429).
+ */
+async function emergencyFood(bot) {
+  const critical = bot.health <= 8 || bot.food <= 6;
+  if (!critical) return false;
+
+  console.log('[PASSIVE] EMERGENCY food hp', bot.health, 'hunger', bot.food);
+
+  // 1) already have food → eat
+  if (await eatIfNeeded(bot)) return true;
+
+  // 2) berries bushes
+  const berries = findBlock(bot, ['sweet_berry_bush', 'glow_berries'], 16);
+  if (berries) {
+    await goto(bot, berries.position.x, berries.position.y, berries.position.z, 2);
+    try {
+      await bot.activateBlock(berries);
+      console.log('[PASSIVE] berries');
+      await sleep(400);
+      if (await eatIfNeeded(bot)) return true;
+    } catch {}
+  }
+
+  // 3) kill nearest food mob
+  const mob = bot.nearestEntity(e => {
+    if (!e || e === bot.entity) return false;
+    const n = String(e.name || e.displayName || '');
+    if (!FOOD_MOB.test(n)) return false;
+    return e.position.distanceTo(bot.entity.position) < 24;
+  });
+  if (mob) {
+    console.log('[PASSIVE] hunt', mob.name || mob.displayName);
+    try {
+      const sword = items(bot).find(i => /sword|axe/.test(i.name));
+      if (sword) await bot.equip(sword, 'hand');
+    } catch {}
+    await goto(bot, mob.position.x, mob.position.y, mob.position.z, 2);
+    for (let i = 0; i < 12; i++) {
+      const live = bot.entities[mob.id];
+      if (!live || !live.isValid) break;
+      try {
+        await bot.lookAt(live.position.offset(0, live.height * 0.5, 0), true);
+        bot.attack(live);
+      } catch {}
+      await sleep(400);
+    }
+    // pickup
+    bot.setControlState('forward', true);
+    await sleep(600);
+    bot.clearControlStates();
+    if (await eatIfNeeded(bot)) return true;
+    return true;
+  }
+
+  // 4) break leaves for apples / collect crops
+  const leaves = findBlock(bot, ['oak_leaves', 'dark_oak_leaves', 'azalea_leaves'], 12);
+  if (leaves) {
+    await dig(bot, leaves);
+    await sleep(300);
+    if (await eatIfNeeded(bot)) return true;
+  }
+
+  const crop = findBlock(bot, ['wheat', 'carrots', 'potatoes', 'beetroots'], 16);
+  if (crop) {
+    await dig(bot, crop);
+    await sleep(300);
+    if (await eatIfNeeded(bot)) return true;
+  }
+
+  return true; // consumed emergency tick even if nothing found
+}
+
 async function ensureTableNearby(bot) {
   const near = bot.findBlock({ matching: b => b?.name === 'crafting_table', maxDistance: 4 });
   if (near) return near;
@@ -207,18 +296,6 @@ async function craft(bot, recipeName, n = 1) {
     console.warn('[PASSIVE] craft fail', recipeName, (e.message || '').slice(0, 30));
     return false;
   }
-}
-
-async function eatIfNeeded(bot) {
-  if (bot.food >= 16 && bot.health >= 14) return false;
-  const food = items(bot).find(i => FOOD_RE.test(i.name));
-  if (!food) return false;
-  try {
-    await bot.equip(food, 'hand');
-    await race(bot.consume(), 4000);
-    console.log('[PASSIVE] eat');
-    return true;
-  } catch { return false; }
 }
 
 async function equipBest(bot, kind) {
@@ -339,93 +416,6 @@ async function escapeHole(bot) {
   } catch { return false; }
 }
 
-async function buildShelter(bot, agent) {
-  if (bot._dreamHomeBuilt || agent._dreamHomeBuilt) return false;
-  const buildItems = items(bot).filter(i => BUILD_RE.test(i.name));
-  const totalBlocks = buildItems.reduce((a, i) => a + i.count, 0);
-  if (totalBlocks < 40) return false;
-  const origin = bot.entity.position.floored();
-  const ground = bot.blockAt(origin.offset(0, -1, 0));
-  if (!ground || ground.boundingBox !== 'block') return false;
-
-  console.log('[PASSIVE] building HOUSE 5x5');
-  const size = 5;
-  let placed = 0;
-
-  for (let x = 0; x < size; x++) {
-    for (let z = 0; z < size; z++) {
-      const pos = origin.offset(x, -1, z);
-      const b = bot.blockAt(pos);
-      if (b && b.name !== 'air' && b.boundingBox === 'block') continue;
-      const below = bot.blockAt(pos.offset(0, -1, 0));
-      const ref = below && below.boundingBox === 'block' ? below : ground;
-      if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
-      if (await placeAt(bot, ref, new Vec3(0, 1, 0))) placed++;
-      await sleep(50);
-    }
-  }
-
-  for (let y = 0; y < 2; y++) {
-    for (let x = 0; x < size; x++) {
-      for (const z of [0, size - 1]) {
-        if (z === 0 && x === 2) continue;
-        const pos = origin.offset(x, y, z);
-        if (bot.blockAt(pos)?.boundingBox === 'block') continue;
-        const ref = bot.blockAt(pos.offset(0, -1, 0));
-        if (!ref || ref.boundingBox !== 'block') continue;
-        if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
-        if (await placeAt(bot, ref, new Vec3(0, 1, 0))) placed++;
-        await sleep(40);
-      }
-    }
-    for (let z = 1; z < size - 1; z++) {
-      for (const x of [0, size - 1]) {
-        const pos = origin.offset(x, y, z);
-        if (bot.blockAt(pos)?.boundingBox === 'block') continue;
-        const ref = bot.blockAt(pos.offset(0, -1, 0));
-        if (!ref || ref.boundingBox !== 'block') continue;
-        if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y, pos.z, 2);
-        if (await placeAt(bot, ref, new Vec3(0, 1, 0))) placed++;
-        await sleep(40);
-      }
-    }
-  }
-
-  for (let x = 0; x < size; x++) {
-    for (let z = 0; z < size; z++) {
-      const pos = origin.offset(x, 2, z);
-      if (bot.blockAt(pos)?.boundingBox === 'block') continue;
-      const ref = bot.blockAt(pos.offset(0, -1, 0));
-      if (!ref || ref.boundingBox !== 'block') continue;
-      if (bot.entity.position.distanceTo(pos) > 3.5) await goto(bot, pos.x, origin.y + 1, pos.z, 2);
-      if (await placeAt(bot, ref, new Vec3(0, 1, 0))) placed++;
-      await sleep(40);
-    }
-  }
-
-  if (count(bot, 'torch') > 0) {
-    try {
-      const torch = items(bot).find(i => i.name === 'torch');
-      if (torch) {
-        await bot.equip(torch, 'hand');
-        const wall = bot.blockAt(origin.offset(1, 1, 1));
-        if (wall) {
-          await bot.lookAt(wall.position.offset(0.5, 0.5, 0.5), true);
-          try { await race(bot.placeBlock(wall, new Vec3(0, 0, 1)), 2000); } catch {}
-        }
-      }
-    } catch {}
-  }
-
-  const home = origin.offset(2, 0, 2);
-  bot._dreamHome = home;
-  bot._dreamHomeBuilt = true;
-  agent._dreamHomeBuilt = true;
-  agent._dreamHome = home;
-  console.log('[PASSIVE] HOUSE DONE placed~', placed, 'home', home.x, home.y, home.z);
-  return true;
-}
-
 function enableAutoJump(bot) {
   if (bot._dreamAutoJump) return;
   bot._dreamAutoJump = true;
@@ -446,7 +436,6 @@ function enableAutoJump(bot) {
       }
     } catch {}
   });
-  console.log('[PASSIVE] auto-jump ON');
 }
 
 function watchToolBreak(bot) {
@@ -457,10 +446,7 @@ function watchToolBreak(bot) {
     try {
       if (!bot.entity) return;
       const picks = items(bot).filter(i => /pickaxe/.test(i.name)).length;
-      if (lastPicks > 0 && picks === 0) {
-        console.log('[PASSIVE] pickaxe broke!');
-        clearToolCraftCooldown();
-      }
+      if (lastPicks > 0 && picks === 0) clearToolCraftCooldown();
       lastPicks = picks;
     } catch {}
   }, 2000);
@@ -470,7 +456,9 @@ export async function runPassiveSkillTick(agent) {
   const bot = agent.bot;
   if (!bot?.entity || bot._dreamPvpActive) return;
 
+  // CRITICAL first — ignore Groq / self_preservation stuck
   if (await escapeHole(bot)) return;
+  if (await emergencyFood(bot)) return;
   if (await bridgeGap(bot)) return;
 
   const logs = countRe(bot, /_log$/);
@@ -488,7 +476,6 @@ export async function runPassiveSkillTick(agent) {
   const diamonds = count(bot, 'diamond');
   const coal = count(bot, 'coal') + count(bot, 'charcoal');
   const hasFurnace = has(bot, 'furnace');
-  const buildCount = items(bot).filter(i => BUILD_RE.test(i.name)).reduce((a, i) => a + i.count, 0);
 
   if (await eatIfNeeded(bot)) return;
   if (await replaceBrokenTools(bot)) return;
@@ -541,64 +528,21 @@ export async function runPassiveSkillTick(agent) {
   if (iron >= 3 && sticks >= 2 && !ironPick && !diaPick && canTryCraft('iron_pickaxe')) {
     if (await craft(bot, 'iron_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
-  if (iron >= 2 && sticks >= 1 && !hasRe(bot, /iron_sword/) && canTryCraft('iron_sword')) {
-    if (await craft(bot, 'iron_sword', 1)) return;
-  }
 
-  // DIAMONDS — path toward zerar (3 IAs short style)
   if (ironPick || diaPick) {
     if (diamonds < 5) {
       console.log('[PASSIVE] hunt diamonds');
       await equipBest(bot, 'pickaxe');
-      // prefer deep levels: go down if high
-      if (bot.entity.position.y > 20) {
-        const below = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0));
-        if (below && /stone|deepslate|dirt|grass/.test(below.name)) {
-          // strip mine style: dig forward at y~12 if possible later
-        }
-      }
       if (await collect(bot, ['diamond_ore', 'deepslate_diamond_ore'], 1, 40)) return;
     }
   }
 
   if (diamonds >= 3 && sticks >= 2 && !diaPick && canTryCraft('diamond_pickaxe')) {
-    if (await craft(bot, 'diamond_pickaxe', 1)) {
-      await equipBest(bot, 'pickaxe');
-      console.log('[PASSIVE] DIAMOND PICK');
-      return;
-    }
-  }
-  if (diamonds >= 2 && sticks >= 1 && !hasRe(bot, /diamond_sword/) && canTryCraft('diamond_sword')) {
-    if (await craft(bot, 'diamond_sword', 1)) return;
+    if (await craft(bot, 'diamond_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
 
   if (coal >= 1 && sticks >= 1 && count(bot, 'torch') < 20 && canTryCraft('torch')) {
     if (await craft(bot, 'torch', 4)) return;
-  }
-
-  if (!bot._dreamHomeBuilt && buildCount >= 40 && anyPick) {
-    if (await buildShelter(bot, agent)) return;
-  }
-
-  const time = bot.time?.timeOfDay ?? 0;
-  if (bot._dreamHome && (time > 12000 || bot.health < 10)) {
-    const h = bot._dreamHome;
-    console.log('[PASSIVE] return home');
-    await goto(bot, h.x, h.y, h.z, 2);
-    return;
-  }
-
-  // Cave explore when iron+ (look for diamonds)
-  if (ironPick || diaPick) {
-    console.log('[PASSIVE] cave explore');
-    const yaw = bot.entity.yaw + (Math.random() - 0.5) * 1.2;
-    try { await bot.look(yaw, 0.15, true); } catch {}
-    await bridgeGap(bot);
-    const ty = Math.max(8, bot.entity.position.y - (Math.random() > 0.6 ? 2 : 0));
-    const tx = bot.entity.position.x - Math.sin(yaw) * 12;
-    const tz = bot.entity.position.z - Math.cos(yaw) * 12;
-    await goto(bot, tx, ty, tz, 2);
-    return;
   }
 
   console.log('[PASSIVE] explore');
@@ -642,7 +586,8 @@ export function startPassiveSkills(agent) {
     }
   };
 
-  setTimeout(tick, 2500);
-  setInterval(tick, 6000);
-  console.log('[PASSIVE] BRAIN ON — house + diamonds + combo path (above 3 IAs early game)');
+  // Faster ticks when critical survival
+  setTimeout(tick, 1500);
+  setInterval(tick, 4000);
+  console.log('[PASSIVE] BRAIN ON — emergency food + survival (works without Groq)');
 }
