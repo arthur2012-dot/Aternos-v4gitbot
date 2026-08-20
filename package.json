@@ -1,8 +1,8 @@
 {
     "name": "dreambot-mindcraft",
-    "version": "4.0.20-force-redeploy",
+    "version": "4.0.21-v7-stable-emergent",
     "type": "module",
-    "description": "DreamBot - full mineflayer plugin stack (force rebuild 2026-08-20)",
+    "description": "DreamBot - stable + emergent (v7 pure-survival, anti-freeze soft)",
     "engines": {
         "node": ">=22"
     },
