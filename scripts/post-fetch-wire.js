@@ -31,6 +31,7 @@ copy('scripts/task-guard.js', 'src/agent/task-guard.js');
 copy('scripts/dig-place.js', 'src/agent/dig-place.js');
 copy('scripts/koneko-behaviors.js', 'src/agent/koneko-behaviors.js');
 copy('scripts/mobile-viewer.js', 'src/agent/mobile-viewer.js');
+copy('scripts/nav-tree.js', 'src/agent/nav-tree.js');
 
 const agentPath = join(ROOT, 'src/agent/agent.js');
 if (!existsSync(agentPath)) process.exit(0);
@@ -76,6 +77,10 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
                 } catch (e2) { console.warn('[DreamBot] nav', e2.message); }
             }
             try {
+                const { startNavTree } = await import('./nav-tree.js');
+                startNavTree(this);
+            } catch (e) { console.warn('[DreamBot] navtree', e.message); }
+            try {
                 const { startPvpCombat } = await import('./pvp-combat.js');
                 startPvpCombat(this);
             } catch (e) { console.warn('[DreamBot] pvp', e.message); }
@@ -116,6 +121,36 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
     agent = agent.replace(
       /this\.bot\.once\('spawn', async \(\) => \{/,
       `this.bot.once('spawn', async () => {${block}`
+    );
+  }
+}
+
+// Ensure nav-tree is wired even if FULL STACK already exists
+if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startNavTree')) {
+  agent = agent.replace(
+    /startNavStack\(this\);\s*\} catch \(e\) \{[\s\S]*?console\.warn\('\[DreamBot\] nav', e2?\.message\); \}\s*\}/,
+    `startNavStack(this);
+            } catch (e) {
+                try {
+                    const { startBaritoneNav } = await import('./baritone-nav.js');
+                    await startBaritoneNav(this);
+                } catch (e2) { console.warn('[DreamBot] nav', e2.message); }
+            }
+            try {
+                const { startNavTree } = await import('./nav-tree.js');
+                startNavTree(this);
+            } catch (e) { console.warn('[DreamBot] navtree', e.message); }`
+  );
+  // fallback simpler inject after nav stack block
+  if (!agent.includes('startNavTree')) {
+    agent = agent.replace(
+      /startPvpCombat\(this\);/,
+      `startNavTree && null;
+            try {
+                const { startNavTree } = await import('./nav-tree.js');
+                startNavTree(this);
+            } catch (e) { console.warn('[DreamBot] navtree', e.message); }
+            startPvpCombat(this);`
     );
   }
 }
@@ -169,4 +204,4 @@ if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startGroqHeartbe
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] full stack + groq-heartbeat');
+console.log('[post-wire] full stack + nav-tree + groq-heartbeat');
