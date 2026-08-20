@@ -1,59 +1,36 @@
 /**
- * Pathfinder Movements otimizado (docs pathfinder + baritone practices)
- * - canDig + digCost moderado (prefere contornar se barato)
- * - liquidCost alto (evita água)
- * - scaffolding dirt/cobble
- * - maxDropDown seguro
+ * Pathfinder movements — dig ok, place/scaffolding OFF (no random dirt towers)
  */
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
+import pathfinderPkg from 'mineflayer-pathfinder';
+const { Movements } = pathfinderPkg;
 
 export function setupDreamBotMovements(bot) {
-  if (!bot?.pathfinder) return false;
+  if (!bot?.pathfinder) return null;
   try {
-    const { Movements } = require('mineflayer-pathfinder');
-    const mcData = require('minecraft-data')(bot.version);
-    const moves = new Movements(bot, mcData);
-
-    moves.canDig = true;
-    moves.digCost = 1.4;
-    moves.placeCost = 1.3;
-    moves.liquidCost = 8;
-    moves.entityCost = 1.5;
-    moves.maxDropDown = 3;
-    moves.allowSprinting = true;
-    moves.allowParkour = true;
-    moves.allow1by1towers = true;
-    moves.dontCreateFlow = true;
-    moves.dontMineUnderFallingBlock = true;
-
-    // scaffolding preferidos
+    const mv = new Movements(bot);
+    mv.canDig = true;
+    mv.digCost = 1.2;
+    mv.placeCost = 100;
+    mv.liquidCost = 8;
+    mv.allowSprinting = true;
+    mv.allowParkour = true;
+    mv.allow1by1towers = false;
+    mv.canPlaceOn = new Set();
+    mv.scaffoldingBlocks = [];
+    mv.maxDropDown = 3;
     try {
-      const names = ['dirt', 'cobblestone', 'netherrack', 'cobbled_deepslate', 'stone'];
-      for (const n of names) {
-        const id = mcData.itemsByName[n]?.id;
-        if (id != null && !moves.scafoldingBlocks.includes(id)) {
-          moves.scafoldingBlocks.push(id);
-        }
+      // don't dig chests/spawners
+      const bad = ['chest', 'trapped_chest', 'spawner', 'bedrock', 'barrier'];
+      for (const name of bad) {
+        const b = bot.registry?.blocksByName?.[name];
+        if (b) mv.blocksCantBreak.add(b.id);
       }
     } catch {}
-
-    // não quebrar baús / spawners / portal
-    try {
-      for (const n of ['chest', 'trapped_chest', 'spawner', 'ender_chest', 'bedrock', 'barrier']) {
-        const b = mcData.blocksByName[n];
-        if (b) moves.blocksCantBreak.add(b.id);
-      }
-    } catch {}
-
-    bot.pathfinder.setMovements(moves);
-    bot.pathfinder.thinkTimeout = 8000;
-    console.log('[MOVE] pathfinder: dig+sprint+parkour liquidCost=8 maxDrop=3');
-    return true;
+    bot.pathfinder.setMovements(mv);
+    console.log('[MOVE] dig=ON place/scaffold=OFF towers=OFF');
+    return mv;
   } catch (e) {
-    console.warn('[MOVE] setup failed', e.message);
-    return false;
+    console.warn('[MOVE]', e.message);
+    return null;
   }
 }
-
-export default setupDreamBotMovements;
