@@ -1,8 +1,7 @@
 /**
  * pure-survival.js — stack completa, 1 ação por vez
- * pathfinding: mineflayer-baritone (ashfinder) → pathfinder
- * coletar: collectblock | combate: pvp | tool | craft nativo
- * Prioridade: sobreviver > combate > craft > coletar > explorar
+ * Plugins via plugin-stack + ensure local
+ * Prioridade: sobreviver > combate > abrigo noite > craft > coletar > explorar
  */
 
 import pathfinderPkg from 'mineflayer-pathfinder';
@@ -41,6 +40,16 @@ function findItem(bot, re) {
 }
 
 function ensurePlugins(bot) {
+  // prefer full stack loader
+  try {
+    const { loadAllPlugins } = require('./plugin-stack.js');
+    if (typeof loadAllPlugins === 'function') loadAllPlugins(bot);
+  } catch {
+    try {
+      // dynamic import not sync — fallback inline
+    } catch {}
+  }
+
   try {
     if (!bot.pathfinder) bot.loadPlugin(pathfinder);
     const mv = new Movements(bot);
@@ -58,7 +67,7 @@ function ensurePlugins(bot) {
       const loader = baritone.loader || baritone.default?.loader || baritone;
       if (typeof loader === 'function') {
         bot.loadPlugin(loader);
-        console.log('[PURE] ashfinder (mineflayer-baritone) ON');
+        console.log('[PURE] ashfinder ON');
       }
     }
     if (bot.ashfinder?.config) {
@@ -99,6 +108,15 @@ function isPlayable(bot) {
     if (gm === 'adventure' || gm === 'spectator') return false;
   } catch {}
   return true;
+}
+
+function isNight(bot) {
+  try {
+    const t = bot.time?.timeOfDay ?? bot.time?.age ?? 0;
+    return t > 13000 && t < 23000;
+  } catch {
+    return false;
+  }
 }
 
 async function gotoNear(bot, x, y, z, range = 2) {
@@ -302,6 +320,7 @@ export function startPureSurvival(agent) {
 
   let busy = false;
   let lastDecision = 0;
+  let lastShelter = 0;
   const DECISION_MS = 700;
 
   async function runOnce() {
@@ -330,6 +349,15 @@ export function startPureSurvival(agent) {
       }
       if (bot.pvp?.target) {
         try { await bot.pvp.stop(); } catch {}
+      }
+
+      // abrigo à noite (no máximo 1x a cada 3 min)
+      if (isNight(bot) && Date.now() - lastShelter > 180000) {
+        if (typeof bot.dreamBuildShelter === 'function') {
+          const ok = await bot.dreamBuildShelter();
+          lastShelter = Date.now();
+          if (ok) return;
+        }
       }
 
       if (await doCraftProgress(bot)) return;
@@ -384,7 +412,20 @@ export function startPureSurvival(agent) {
         })();
       }
     }
+    if (m === 'casa' || m === 'shelter') {
+      (async () => {
+        if (busy) return;
+        busy = true;
+        bot._dreamBusy = true;
+        try {
+          if (bot.dreamBuildShelter) await bot.dreamBuildShelter();
+        } finally {
+          busy = false;
+          bot._dreamBusy = false;
+        }
+      })();
+    }
   });
 
-  console.log('[PURE] stack ON — baritone/pathfinder + collect + pvp + tool + craft | 1 ação');
+  console.log('[PURE] FULL stack — baritone + collect + pvp + tool + craft + shelter | 1 ação');
 }
