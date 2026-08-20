@@ -1,0 +1,4 @@
+DREAMBOT_BUILD=2026-08-20-FORCE-REDEPLOY-v4
+STACK=pure-survival + water-escape + house-builder + plugin-stack
+CACHE_BUST=2026-08-20-FORCE-REDEPLOY-v4-pure-stack
+If Railway still shows old logs, disconnect GitHub and reconnect, or delete service and recreate from this repo.

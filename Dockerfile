@@ -26,7 +26,9 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-ARG CACHE_BUST=2026-08-19-force-3d-v1
+# Force Railway to discard old layer cache and rebuild everything
+ARG CACHE_BUST=2026-08-20-FORCE-REDEPLOY-v4-pure-stack
+ENV DREAMBOT_BUILD_ID=2026-08-20-force-v4
 
 COPY package.json ./
 COPY scripts ./scripts
@@ -43,7 +45,6 @@ RUN node scripts/fetch-base.js || echo '[docker] fetch-base deferred'
 ENV PORT=8080
 ENV ENABLE_VIEWER=1
 ENV VIEWER_INTERNAL_PORT=3001
-# Limit Node heap a bit to reduce sudden OOM kills if possible
 ENV NODE_OPTIONS=--max-old-space-size=512
 EXPOSE 8080
 

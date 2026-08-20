@@ -5,3 +5,4 @@ dockerfilePath = "Dockerfile"
 [deploy]
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
+# Force new deploy marker: 2026-08-20-force-v4
