@@ -1,6 +1,6 @@
 /**
  * Navigation: pathfinder + ashfinder with LOCK (one goal at a time).
- * GoalChanged is normal when unstuck cancels a path — never treat as fatal.
+ * NO random yaw spin. Respects bot._digLocked everywhere.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -119,16 +119,9 @@ function installDreamGoto(bot) {
   bot._navSince = 0;
 
   bot.dreamStopNav = () => {
-    try {
-      bot.ashfinder?.stop?.();
-    } catch {}
-    try {
-      // stop() first — setGoal(null) alone throws GoalChanged on active goto
-      bot.pathfinder?.stop?.();
-    } catch {}
-    try {
-      bot.pathfinder?.setGoal?.(null);
-    } catch (e) {
+    try { bot.ashfinder?.stop?.(); } catch {}
+    try { bot.pathfinder?.stop?.(); } catch {}
+    try { bot.pathfinder?.setGoal?.(null); } catch (e) {
       const m = String(e?.message || e || '');
       if (!/GoalChanged|PathStopped|No path/i.test(m)) {
         console.warn('[NAV] stop', m.slice(0, 40));
@@ -139,12 +132,11 @@ function installDreamGoto(bot) {
 
   bot.dreamGoto = async (x, y, z, range = 1) => {
     if (!bot.entity) return false;
+    if (bot._digLocked) return false; // never path while dig locked
 
     if (bot._navBusy) {
       const age = Date.now() - (bot._navSince || 0);
-      if (age < 25000) {
-        return false;
-      }
+      if (age < 25000) return false;
       bot.dreamStopNav();
     }
 
@@ -208,37 +200,38 @@ function installDreamGoto(bot) {
   bot.dreamIsNavigating = () =>
     !!bot._navBusy ||
     !!bot.pathfinder?.isMoving?.() ||
-    !!bot.targetDigBlock;
+    !!bot.targetDigBlock ||
+    !!bot._digLocked;
 }
 
 async function digEscapeTight(bot) {
   if (!bot.entity) return false;
+  if (bot._digLocked) return false;
   const p = bot.entity.position.floored();
   const inv = bot.inventory.items();
   const pick = inv.find((i) => /pickaxe/.test(i.name));
   const axe = inv.find((i) => /_axe$/.test(i.name));
   const shovel = inv.find((i) => /shovel/.test(i.name));
 
-  try {
-    const look = bot.blockAtCursor?.(3.5);
-    if (look && look.boundingBox === 'block' && !/bedrock|barrier/.test(look.name || '')) {
-      const n = look.name || '';
-      if (/dirt|grass|sand|gravel|clay|mud/.test(n) && shovel) await bot.equip(shovel, 'hand');
-      else if (/_log$|leaves|planks/.test(n) && axe) await bot.equip(axe, 'hand');
-      else if (pick) await bot.equip(pick, 'hand');
-      await bot.lookAt(look.position.offset(0.5, 0.5, 0.5), true);
-      await withTimeout(bot.dig(look), 8000);
-      console.log('[NAV] dig face', n);
-    }
-  } catch { try { bot.stopDigging(); } catch {} }
-
+  // Prefer fixed positions relative to CURRENT yaw — dig then walk SAME way, NO spin
   const yaw = bot.entity.yaw;
-  const fdx = Math.round(-Math.sin(yaw));
-  const fdz = Math.round(-Math.cos(yaw));
-  const facing = [[fdx, 0, fdz], [fdx, 1, fdz], [0, 1, 0], [0, 2, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+  const fdx = Math.round(-Math.sin(yaw)) || 0;
+  const fdz = Math.round(-Math.cos(yaw)) || -1;
+
+  const order = [
+    [fdx, 0, fdz],
+    [fdx, 1, fdz],
+    [0, 1, 0],
+    [0, 2, 0],
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+  ];
 
   let dug = 0;
-  for (const [ox, oy, oz] of facing) {
+  for (const [ox, oy, oz] of order) {
+    if (bot._digLocked) break;
     try {
       const b = bot.blockAt(p.offset(ox, oy, oz));
       if (!b || b.name === 'air' || b.name === 'cave_air' || b.name === 'water') continue;
@@ -248,21 +241,48 @@ async function digEscapeTight(bot) {
       if (/dirt|grass|sand|gravel/.test(n) && shovel) { try { await bot.equip(shovel, 'hand'); } catch {} }
       else if (/_log$|planks|leaves/.test(n) && axe) { try { await bot.equip(axe, 'hand'); } catch {} }
       else if (pick) { try { await bot.equip(pick, 'hand'); } catch {} }
-      await bot.lookAt(b.position.offset(0.5, 0.5, 0.5), true);
-      await withTimeout(bot.dig(b), 8000);
-      dug++;
-      if (dug >= 5) break;
-    } catch { try { bot.stopDigging(); } catch {} }
+
+      // dig with lock via shared dig-place if available, else local locked dig
+      bot._digLocked = true;
+      bot._digLockPos = b.position.clone();
+      bot._digLockUntil = Date.now() + 12000;
+      const center = b.position.offset(0.5, 0.5, 0.5);
+      try {
+        await bot.lookAt(center, true);
+        const lookIv = setInterval(() => {
+          try { bot.lookAt(center, true).catch(() => {}); } catch {}
+        }, 200);
+        try {
+          await withTimeout(bot.dig(b, true), 10000);
+        } catch {
+          try { bot.stopDigging(); } catch {}
+        } finally {
+          clearInterval(lookIv);
+        }
+        dug++;
+      } finally {
+        bot._digLocked = false;
+        bot._digLockPos = null;
+        bot._digLockUntil = 0;
+      }
+      if (dug >= 4) break;
+    } catch {
+      try { bot.stopDigging(); } catch {}
+      bot._digLocked = false;
+      bot._digLockPos = null;
+    }
   }
 
+  // walk FORWARD in same facing — NO 90 degree spin
+  try {
+    await bot.look(yaw, 0, true);
+  } catch {}
   bot.setControlState('jump', true);
   bot.setControlState('forward', true);
-  await new Promise((r) => setTimeout(r, 400));
-  bot.entity.yaw += Math.PI / 2;
-  try { await bot.look(bot.entity.yaw, 0, true); } catch {}
-  await new Promise((r) => setTimeout(r, 400));
+  bot.setControlState('sprint', true);
+  await new Promise((r) => setTimeout(r, 500));
   bot.clearControlStates();
-  if (dug > 0) console.log('[NAV] dug escape blocks:', dug);
+  if (dug > 0) console.log('[NAV] dug escape blocks:', dug, '(no spin)');
   return dug > 0;
 }
 
@@ -275,7 +295,7 @@ function startUnstuck(bot, agent) {
   setInterval(async () => {
     try {
       if (!bot.entity || bot._dreamPvpActive) return;
-      if (bot.targetDigBlock) {
+      if (bot._digLocked || bot.targetDigBlock) {
         still = 0;
         return;
       }
@@ -287,10 +307,9 @@ function startUnstuck(bot, agent) {
       else still = 0;
       lx = x; ly = y; lz = z;
 
-      // ~4.5s still before dig (was 3s — less GoalChanged spam mid-path)
       if (still >= 3) {
         still = 0;
-        console.log('[NAV] STUCK → dig wall+face');
+        console.log('[NAV] STUCK → dig wall (no spin)');
         try { bot.dreamStopNav(); } catch {}
         try { await digEscapeTight(bot); } catch (e) {
           console.warn('[NAV] dig escape', (e.message || '').slice(0, 40));
@@ -309,17 +328,15 @@ export async function startNavStack(agent) {
   await setupAshfinder(bot);
   installDreamGoto(bot);
 
-  // Swallow pathfinder GoalChanged so Mindcraft does not print !!Code threw!!
   try {
     bot.on('path_update', () => {});
-    const origEmit = bot.pathfinder?.emit?.bind(bot.pathfinder);
   } catch {}
 
   const boot = () => {
     setupPrismarine(bot);
     if (bot.ashfinder) configAsh(bot);
     startUnstuck(bot, agent);
-    console.log('[NAV] READY — locked goto + soft GoalChanged');
+    console.log('[NAV] READY — no yaw spin + dig lock');
   };
 
   if (bot.entity) boot();
