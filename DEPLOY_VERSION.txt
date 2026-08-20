@@ -1,2 +1,2 @@
-DREAMBOT_BUILD=2026-08-20-PURE-v9-wallpush-kill
-FIX=when face blocked + low velocity → clear controls immediately, dig soft or score-turn, never keep pushing into wall
+DREAMBOT_BUILD=2026-08-20-FULL-MINDCRAFT-SYNC
+FIX=fetch-base copies entire mindcraft (src, profiles, tasks, bots, patches, services) then applies DreamBot overlays

@@ -1,13 +1,14 @@
 {
     "name": "dreambot-mindcraft",
-    "version": "4.0.21-v7-stable-emergent",
+    "version": "4.1.0-full-mindcraft",
     "type": "module",
-    "description": "DreamBot - stable + emergent (v7 pure-survival, anti-freeze soft)",
+    "description": "DreamBot — full mindcraft base + pure-survival overlays",
     "engines": {
         "node": ">=22"
     },
     "dependencies": {
         "@anthropic-ai/sdk": "^0.17.1",
+        "@cerebras/cerebras_cloud_sdk": "^1.46.0",
         "@eslint/js": "^9.13.0",
         "@google/genai": "^1.15.0",
         "@huggingface/inference": "^2.8.1",
@@ -42,12 +43,14 @@
         "ses": "^1.9.1",
         "socket.io": "^4.7.2",
         "socket.io-client": "^4.7.2",
+        "three": "^0.128.0",
         "vec3": "^0.1.10",
         "yargs": "^17.7.2"
     },
     "scripts": {
         "postinstall": "echo '[postinstall] ok'",
-        "prestart": "node scripts/fetch-base.js && node scripts/post-fetch-wire.js && node scripts/patch-mindserver.js && node scripts/patch-viewer-proxy.js && node scripts/patch-ui-viewer.js && node scripts/patch-security.js && node scripts/patch-ai-nonblock.js && node scripts/patch-passive-boost.js && node scripts/patch-koneko-water.js && node scripts/fix-agent-syntax.js",
-        "start": "node main.js"
+        "prestart": "FORCE_MINDCRAFT_REFRESH=1 node scripts/fetch-base.js && node scripts/post-fetch-wire.js && node scripts/patch-mindserver.js && node scripts/patch-viewer-proxy.js && node scripts/patch-ui-viewer.js && node scripts/patch-security.js && node scripts/patch-ai-nonblock.js && node scripts/patch-passive-boost.js && node scripts/patch-koneko-water.js && node scripts/fix-agent-syntax.js",
+        "start": "node main.js",
+        "sync-mindcraft": "FORCE_MINDCRAFT_REFRESH=1 node scripts/fetch-base.js"
     }
 }
