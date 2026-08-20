@@ -19,7 +19,6 @@ function copy(from, to) {
   return true;
 }
 
-// --- módulos reais (nunca substituir por alias) ---
 const REAL = [
   ['scripts/dig-place.js', 'src/agent/dig-place.js'],
   ['scripts/mindcraft-skills.js', 'src/agent/mindcraft-skills.js'],
@@ -28,6 +27,8 @@ const REAL = [
   ['scripts/plugin-stack.js', 'src/agent/plugin-stack.js'],
   ['scripts/simple-shelter.js', 'src/agent/simple-shelter.js'],
   ['scripts/house-builder.js', 'src/agent/house-builder.js'],
+  ['scripts/water-escape.js', 'src/agent/water-escape.js'],
+  ['scripts/setup-movements.js', 'src/agent/setup-movements.js'],
   ['scripts/pvp-combat.js', 'src/agent/pvp-combat.js'],
   ['scripts/multiplayer-social.js', 'src/agent/multiplayer-social.js'],
   ['scripts/kill-chat.js', 'src/agent/kill-chat.js'],
@@ -38,12 +39,10 @@ const REAL = [
   ['scripts/nav-stack.js', 'src/agent/nav-stack.js'],
   ['scripts/passive-skills.js', 'src/agent/passive-skills.js'],
   ['scripts/env-navigation.js', 'src/agent/env-navigation.js'],
-  ['scripts/setup-movements.js', 'src/agent/setup-movements.js'],
 ];
 
 for (const [from, to] of REAL) copy(from, to);
 
-// Alias SÓ se o arquivo real não existir (fallback)
 function aliasIfMissing(name, exportMap) {
   const dst = join(ROOT, 'src/agent', name);
   if (existsSync(dst)) {
@@ -62,8 +61,7 @@ function aliasIfMissing(name, exportMap) {
 `
     )
     .join('\n');
-  writeFileSync(dst, `/** Fallback alias → mindcraft-skills */\n${lines}`);
-  console.log('[post-wire] alias fallback', name);
+  writeFileSync(dst, `/** Fallback alias */\n${lines}`);
 }
 
 aliasIfMissing('baritone-nav.js', { startBaritoneNav: 'startMindcraftSkills' });
@@ -72,14 +70,9 @@ aliasIfMissing('task-guard.js', { startTaskGuard: 'startMindcraftSkills' });
 
 function aliasToCore(name, exportName) {
   const dst = join(ROOT, 'src/agent', name);
-  // se já copiamos arquivo real grande, não sobrescreve
   if (existsSync(dst)) {
     try {
-      const sz = readFileSync(dst, 'utf8').length;
-      if (sz > 500) {
-        console.log('[post-wire] keep real', name, sz);
-        return;
-      }
+      if (readFileSync(dst, 'utf8').length > 500) return;
     } catch {}
   }
   mkdirSync(dirname(dst), { recursive: true });
@@ -126,7 +119,7 @@ agent = agent.replace(
 
 if (!agent.includes('[DreamBot] MINDCRAFT STACK')) {
   const block = `
-            // [DreamBot] MINDCRAFT STACK — real modules only
+            // [DreamBot] MINDCRAFT STACK
             try {
                 const { startKillChat } = await import('./kill-chat.js');
                 startKillChat(this);
@@ -181,4 +174,4 @@ if (!agent.includes('[DreamBot] MINDCRAFT STACK')) {
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] REAL modules kept + house-builder wired');
+console.log('[post-wire] modules + water-escape');
