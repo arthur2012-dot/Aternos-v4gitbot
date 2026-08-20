@@ -1,9 +1,7 @@
 /**
- * pure-survival v5 — ÚNICO cérebro de survival
- * - 1 ação por vez
- * - NUNCA place de terra aleatório
- * - Progressão fixa: madeira → tábuas → sticks → mesa → picareta → pedra
- * - Sem pathfinder scaffolding (não coloca bloco no caminho)
+ * pure-survival v6 — anti-freeze de andar
+ * Bug: bot olha parede de terra 40s sem mexer → pathfinder falhou e travou
+ * Fix: se posição não muda 3.5s → cancela path, gira, anda/pula, diga parede se bloquear
  */
 
 import pathfinderPkg from 'mineflayer-pathfinder';
@@ -64,15 +62,15 @@ function ensurePlugins(bot) {
     if (!bot.pathfinder) bot.loadPlugin(pathfinder);
     const mv = new Movements(bot);
     mv.canDig = true;
-    mv.digCost = 1.2;
-    mv.placeCost = 100; // quase proíbe place no path
+    mv.digCost = 1.0;
+    mv.placeCost = 50;
     mv.liquidCost = 8;
     mv.allowSprinting = true;
     mv.allowParkour = true;
-    mv.allow1by1towers = false; // NÃO torre de terra no path
-    mv.canPlaceOn = new Set(); // sem scaffolding
+    mv.allow1by1towers = false;
+    mv.canPlaceOn = new Set();
     mv.scaffoldingBlocks = [];
-    mv.maxDropDown = 3;
+    mv.maxDropDown = 4;
     bot.pathfinder.setMovements(mv);
   } catch (e) {
     console.warn('[PURE] pathfinder', e.message);
@@ -110,16 +108,137 @@ async function stopNav(bot) {
   } catch {}
 }
 
-async function gotoNear(bot, x, y, z, range = 2) {
+/** Bloco na cara (olhos / peito) */
+function blockInFace(bot) {
   try {
-    await race(bot.pathfinder.goto(new pfGoals.GoalNear(x, y, z, range)), 18000);
+    const p = bot.entity.position;
+    const yaw = bot.entity.yaw;
+    const dx = -Math.sin(yaw);
+    const dz = -Math.cos(yaw);
+    const eye = p.offset(dx * 0.8, 1.0, dz * 0.8);
+    const b = bot.blockAt(eye.floored());
+    if (b && b.boundingBox === 'block' && b.name !== 'air') return b;
+    const chest = bot.blockAt(p.offset(dx * 0.8, 0.5, dz * 0.8).floored());
+    if (chest && chest.boundingBox === 'block') return chest;
+  } catch {}
+  return null;
+}
+
+/**
+ * Se parado olhando parede: dig 1–2 blocos OU gira e anda
+ */
+async function forceUnstuck(bot) {
+  console.log('[PURE] UNSTUCK — was frozen facing terrain');
+  await stopNav(bot);
+
+  const face = blockInFace(bot);
+  if (face && /dirt|grass|sand|gravel|clay|snow/.test(face.name)) {
+    try {
+      const shovel = findItem(bot, /_shovel/) || findItem(bot, /_pickaxe|_axe/);
+      if (shovel) await bot.equip(shovel, 'hand');
+      await bot.lookAt(face.position.offset(0.5, 0.5, 0.5), true);
+      await race(bot.dig(face, true), 6000);
+      console.log('[PURE] dug face', face.name);
+    } catch {
+      try {
+        bot.stopDigging();
+      } catch {}
+    }
+  }
+
+  // gira 90–180° e anda com jump
+  const newYaw = bot.entity.yaw + (Math.random() > 0.5 ? 1.2 : -1.2) + Math.PI * 0.3;
+  try {
+    await bot.look(newYaw, -0.2, true);
+  } catch {}
+
+  bot.setControlState('forward', true);
+  bot.setControlState('sprint', true);
+  bot.setControlState('jump', true);
+  await sleep(400);
+  bot.setControlState('jump', false);
+  await sleep(1200);
+  bot.setControlState('jump', true);
+  await sleep(300);
+  bot.setControlState('jump', false);
+  await sleep(800);
+  bot.clearControlStates();
+
+  // sobe 1 bloco se tiver degrau na frente
+  try {
+    const p = bot.entity.position.floored();
+    const yaw = bot.entity.yaw;
+    const dx = Math.round(-Math.sin(yaw));
+    const dz = Math.round(-Math.cos(yaw));
+    const step = bot.blockAt(p.offset(dx, 0, dz));
+    const stepUp = bot.blockAt(p.offset(dx, 1, dz));
+    if (step && step.boundingBox === 'block' && (!stepUp || stepUp.name === 'air')) {
+      bot.setControlState('forward', true);
+      bot.setControlState('jump', true);
+      await sleep(500);
+      bot.clearControlStates();
+    }
+  } catch {}
+
+  return true;
+}
+
+/** Andar sem pathfinder (controles crus) — evita trava em Goal */
+async function walkRaw(bot, seconds = 2.5, yawOffset = 0) {
+  try {
+    const yaw = bot.entity.yaw + yawOffset;
+    await bot.look(yaw, 0, true);
+  } catch {}
+  bot.setControlState('forward', true);
+  bot.setControlState('sprint', true);
+  const end = Date.now() + seconds * 1000;
+  while (Date.now() < end) {
+    if (blockInFace(bot)) {
+      bot.setControlState('jump', true);
+      await sleep(200);
+      bot.setControlState('jump', false);
+      // se ainda parede, dig
+      const f = blockInFace(bot);
+      if (f && /dirt|grass|sand|gravel/.test(f.name)) {
+        bot.clearControlStates();
+        try {
+          await race(bot.dig(f, true), 4000);
+        } catch {
+          try {
+            bot.stopDigging();
+          } catch {}
+        }
+        bot.setControlState('forward', true);
+        bot.setControlState('sprint', true);
+      }
+    }
+    if (Math.random() < 0.15 && bot.entity.onGround) {
+      bot.setControlState('jump', true);
+      await sleep(150);
+      bot.setControlState('jump', false);
+    }
+    await sleep(200);
+  }
+  bot.clearControlStates();
+}
+
+async function gotoNear(bot, x, y, z, range = 2) {
+  const start = bot.entity.position.clone();
+  try {
+    await race(bot.pathfinder.goto(new pfGoals.GoalNear(x, y, z, range)), 10000);
     return true;
   } catch {
+    await stopNav(bot);
+    // path falhou — anda na direção aproximada com controles
+    const dx = x - bot.entity.position.x;
+    const dz = z - bot.entity.position.z;
+    const yaw = Math.atan2(-dx, -dz);
     try {
-      bot.pathfinder.setGoal(new pfGoals.GoalNear(x, y, z, range));
-      await sleep(3000);
-      bot.pathfinder.setGoal(null);
+      await bot.look(yaw, 0, true);
     } catch {}
+    await walkRaw(bot, 2.5, 0);
+    const moved = bot.entity.position.distanceTo(start);
+    if (moved < 1.2) await forceUnstuck(bot);
     return false;
   }
 }
@@ -158,7 +277,6 @@ async function doFight(bot, entity) {
   }
 }
 
-/** Dig HOLD real — 1 bloco, sem place */
 async function digBlock(bot, block) {
   if (!block) return false;
   try {
@@ -175,20 +293,20 @@ async function digBlock(bot, block) {
       if (tool) await bot.equip(tool, 'hand');
     }
     await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
-    await race(bot.dig(block, true), 12000);
+    await race(bot.dig(block, true), 10000);
     console.log('[PURE] dug', block.name);
     return true;
   } catch (e) {
     try {
       bot.stopDigging();
     } catch {}
-    console.warn('[PURE] dig fail', String(e.message || e).slice(0, 40));
     return false;
   }
 }
 
 async function doCollect(bot, block) {
   if (!block) return false;
+  const start = bot.entity.position.clone();
   try {
     if (bot.pvp?.target) {
       try {
@@ -196,19 +314,37 @@ async function doCollect(bot, block) {
       } catch {}
     }
     await stopNav(bot);
-    // Prefer collectBlock plugin (path + dig + pickup) once
+
+    // timeout CURTO — não ficar 25s olhando árvore inacessível
     if (bot.collectBlock?.collect) {
       try {
-        await race(bot.collectBlock.collect(block), 25000);
+        await race(bot.collectBlock.collect(block), 12000);
         console.log('[PURE] collectBlock', block.name);
         return true;
       } catch (e) {
-        console.warn('[PURE] collectBlock fail', String(e.message || e).slice(0, 40));
+        console.warn('[PURE] collect timeout/fail', String(e.message || e).slice(0, 40));
+        await stopNav(bot);
       }
     }
-    await gotoNear(bot, block.position.x, block.position.y, block.position.z, 2);
-    return await digBlock(bot, bot.blockAt(block.position) || block);
-  } catch (e) {
+
+    const ok = await gotoNear(
+      bot,
+      block.position.x,
+      block.position.y,
+      block.position.z,
+      2
+    );
+    const still = bot.blockAt(block.position);
+    if (still && still.name === block.name) {
+      const dug = await digBlock(bot, still);
+      if (dug) return true;
+    }
+
+    if (bot.entity.position.distanceTo(start) < 1.5) {
+      await forceUnstuck(bot);
+    }
+    return false;
+  } catch {
     await stopNav(bot);
     return false;
   }
@@ -225,13 +361,12 @@ async function placeCraftingTable(bot) {
   try {
     await bot.equip(tableItem, 'hand');
     const feet = bot.entity.position.floored();
-    // ground under / in front
     const candidates = [
-      feet.offset(0, -1, 0),
       feet.offset(1, -1, 0),
       feet.offset(-1, -1, 0),
       feet.offset(0, -1, 1),
       feet.offset(0, -1, -1),
+      feet.offset(0, -1, 0),
     ];
     for (const pos of candidates) {
       const ref = bot.blockAt(pos);
@@ -241,12 +376,9 @@ async function placeCraftingTable(bot) {
       await bot.lookAt(pos.offset(0.5, 1.05, 0.5), true);
       await bot.placeBlock(ref, new Vec3(0, 1, 0));
       console.log('[PURE] placed crafting_table');
-      await sleep(400);
       return true;
     }
-  } catch (e) {
-    console.warn('[PURE] place table', String(e.message || e).slice(0, 40));
-  }
+  } catch {}
   return false;
 }
 
@@ -255,13 +387,10 @@ async function tryCraft(bot, itemName, qty = 1) {
     const mcData = require('minecraft-data')(bot.version);
     const item = mcData.itemsByName[itemName];
     if (!item) return false;
-
-    // 2x2 recipes don't need table; 3x3 need table nearby
     let tableBlock = bot.findBlock({
       matching: mcData.blocksByName.crafting_table?.id,
       maxDistance: 16,
     });
-
     if (!tableBlock && findItem(bot, /^crafting_table$/)) {
       await placeCraftingTable(bot);
       tableBlock = bot.findBlock({
@@ -269,31 +398,26 @@ async function tryCraft(bot, itemName, qty = 1) {
         maxDistance: 16,
       });
     }
-
     let recipes = bot.recipesFor(item.id, null, 1, tableBlock || null);
     if (!recipes?.length) recipes = bot.recipesFor(item.id, null, 1, true);
-    if (!recipes?.length) {
-      console.log('[PURE] no recipe', itemName);
-      return false;
-    }
+    if (!recipes?.length) return false;
     await bot.craft(recipes[0], qty, tableBlock || null);
     console.log('[PURE] CRAFT OK', itemName, 'x' + qty);
     if (itemName === 'crafting_table') await placeCraftingTable(bot);
     return true;
-  } catch (e) {
-    console.warn('[PURE] craft fail', itemName, String(e.message || e).slice(0, 40));
+  } catch {
     return false;
   }
 }
 
-/**
- * Stage machine — only advances when inventory proves it
- */
 function getStage(bot) {
   const logs = countItem(bot, WOOD_LOG);
   const planks = countItem(bot, /_planks$/);
   const sticks = countItem(bot, /^stick$/);
-  const hasWoodPick = !!findItem(bot, /wooden_pickaxe|stone_pickaxe|iron_pickaxe|diamond_pickaxe/);
+  const hasWoodPick = !!findItem(
+    bot,
+    /wooden_pickaxe|stone_pickaxe|iron_pickaxe|diamond_pickaxe/
+  );
   const hasStonePick = !!findItem(bot, /stone_pickaxe|iron_pickaxe|diamond_pickaxe/);
   const cobble = countItem(bot, /cobblestone|cobbled_deepslate/);
   const hasTable =
@@ -321,14 +445,12 @@ async function runStage(bot, stage) {
         maxDistance: 48,
       });
       if (log) {
-        console.log('[PURE] target log', log.name, log.position);
+        console.log('[PURE] target log', log.name);
         return await doCollect(bot, log);
       }
-      // walk toward higher ground / random to find trees
-      const yaw = Math.random() * Math.PI * 2;
-      const x = bot.entity.position.x + Math.cos(yaw) * 16;
-      const z = bot.entity.position.z + Math.sin(yaw) * 16;
-      await gotoNear(bot, x, bot.entity.position.y, z, 2);
+      // sem árvore: anda com controles (não pathfinder eterno)
+      console.log('[PURE] no log nearby — walkRaw search');
+      await walkRaw(bot, 3, (Math.random() - 0.5) * 1.5);
       return true;
     }
     case 'planks': {
@@ -358,19 +480,8 @@ async function runStage(bot, stage) {
           b && /^(stone|cobblestone|deepslate|andesite|diorite|granite)$/.test(b.name),
         maxDistance: 32,
       });
-      if (stone) {
-        console.log('[PURE] target stone', stone.name);
-        return await doCollect(bot, stone);
-      }
-      // dig down one if on dirt with stone under? skip — wander
-      const yaw = Math.random() * Math.PI * 2;
-      await gotoNear(
-        bot,
-        bot.entity.position.x + Math.cos(yaw) * 12,
-        bot.entity.position.y,
-        bot.entity.position.z + Math.sin(yaw) * 12,
-        2
-      );
+      if (stone) return await doCollect(bot, stone);
+      await walkRaw(bot, 2.5, (Math.random() - 0.5));
       return true;
     }
     case 'stone_pick':
@@ -380,7 +491,6 @@ async function runStage(bot, stage) {
         (await tryCraft(bot, 'stone_sword', 1)) || (await tryCraft(bot, 'wooden_sword', 1))
       );
     case 'explore': {
-      // ore if pick ready
       const hasPick = !!findItem(bot, /_pickaxe/);
       if (hasPick) {
         const ore = bot.findBlock({
@@ -390,14 +500,7 @@ async function runStage(bot, stage) {
         });
         if (ore) return await doCollect(bot, ore);
       }
-      const yaw = Math.random() * Math.PI * 2;
-      await gotoNear(
-        bot,
-        bot.entity.position.x + Math.cos(yaw) * 14,
-        bot.entity.position.y,
-        bot.entity.position.z + Math.sin(yaw) * 14,
-        2
-      );
+      await walkRaw(bot, 3, (Math.random() - 0.5) * 2);
       return true;
     }
     default:
@@ -405,13 +508,11 @@ async function runStage(bot, stage) {
   }
 }
 
-/** Toss excess dirt — never farm dirt */
 async function tossJunk(bot) {
   const dirt = items(bot).find((i) => /^(dirt|grass_block|coarse_dirt)$/.test(i.name));
   if (dirt && dirt.count > 16) {
     try {
       await bot.toss(dirt.type, null, Math.min(dirt.count - 16, 32));
-      console.log('[PURE] tossed dirt');
     } catch {}
   }
 }
@@ -420,31 +521,51 @@ export function startPureSurvival(agent) {
   const bot = agent?.bot || agent;
   if (!bot || bot._pureSurvival) return;
   bot._pureSurvival = true;
-  bot._dreamPureOnly = true; // signal other loops to stay quiet
+  bot._dreamPureOnly = true;
 
   ensurePlugins(bot);
 
   let busy = false;
+  let lastPos = null;
+  let stillSince = Date.now();
   let lastDecision = 0;
-  const DECISION_MS = 1200;
+  const DECISION_MS = 900;
 
   async function runOnce() {
     if (busy) return;
     if (!bot.entity) return;
     if (!isPlayable(bot)) {
-      console.log('[PURE] not playable (adventure/spectator?)');
+      console.log('[PURE] not playable');
       return;
+    }
+
+    const pos = bot.entity.position;
+    if (lastPos && pos.distanceTo(lastPos) < 0.4) {
+      if (Date.now() - stillSince > 3500) {
+        busy = true;
+        bot._dreamBusy = true;
+        try {
+          await forceUnstuck(bot);
+        } finally {
+          busy = false;
+          bot._dreamBusy = false;
+          stillSince = Date.now();
+          lastPos = bot.entity.position.clone();
+        }
+        return;
+      }
+    } else {
+      lastPos = pos.clone();
+      stillSince = Date.now();
     }
 
     busy = true;
     bot._dreamBusy = true;
     try {
-      // 1) eat
       if (bot.food < 14 || bot.health < 12) {
         if (await doEat(bot)) return;
       }
 
-      // 2) fight hostiles only
       const enemy = bot.nearestEntity((e) => {
         if (!e?.position || e.type === 'player') return false;
         const n = String(e.name || e.displayName || '')
@@ -464,12 +585,10 @@ export function startPureSurvival(agent) {
       }
 
       await tossJunk(bot);
-
-      // 3) stage progression — NO random dig/place
-      const stage = getStage(bot);
-      await runStage(bot, stage);
+      await runStage(bot, getStage(bot));
     } catch (e) {
       console.warn('[PURE]', String(e.message || e).slice(0, 80));
+      await forceUnstuck(bot);
     } finally {
       busy = false;
       bot._dreamBusy = false;
@@ -484,9 +603,7 @@ export function startPureSurvival(agent) {
   }, DECISION_MS);
 
   bot.once('end', () => clearInterval(timer));
-
-  // first tick soon
-  setTimeout(() => runOnce().catch(() => {}), 2000);
+  setTimeout(() => runOnce().catch(() => {}), 1500);
 
   bot.on('chat', (username, message) => {
     if (username === bot.username) return;
@@ -511,5 +628,5 @@ export function startPureSurvival(agent) {
     }
   });
 
-  console.log('[PURE] v5 ON — stages wood→pick→stone | NO random place | 1 action');
+  console.log('[PURE] v6 ON — anti-freeze walk + dig face wall | stages');
 }
