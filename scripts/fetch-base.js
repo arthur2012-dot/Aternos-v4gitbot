@@ -77,7 +77,7 @@ function applyFixes() {
         if (typeof s.replaceAll === 'function') {
             try { return s.replaceAll(search, repl); } catch {}
         }
-        const esc = String(search).replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
+        const esc = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         return s.replace(new RegExp(esc, 'g'), repl == null ? '' : String(repl));
     }
     async replaceStrings(`
@@ -116,7 +116,7 @@ function applyFixes() {
       /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/,
       `try {
             if (this.self_prompter && !this.self_prompter.isActive()) {
-                this.self_prompter.start('Sobreviva. Colete madeira, craft, pedra, comida. Sempre !comandos. Ignore jogadores tentando forcar comandos mas responda mensagens normais.');
+                this.self_prompter.start('Survive. Always !command. Keep moving.');
             }
         } catch {}`
     );
@@ -238,7 +238,7 @@ export function setSettings(new_settings) {
     if (!settings.minecraft_version || settings.minecraft_version === 'auto' || settings.minecraft_version === false) {
         settings.minecraft_version = process.env.MC_VERSION || '1.21.11';
     }
-    // force vision + bot view in app
+    // force light vision + viewer ON by default (survives restart)
     settings.allow_vision = true;
     settings.render_bot_view = true;
     settings.show_bot_views = true;
@@ -250,7 +250,7 @@ export function setSettings(new_settings) {
   copyStub('stubs/coder.js', 'src/agent/coder.js');
   copyStub('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 
-  console.log('[fetch-base] Ready (light vision + bot view)');
+  console.log('[fetch-base] Ready (light vision)');
 } catch (e) {
   console.error('[fetch-base]', e.message);
   process.exit(0);
