@@ -1,5 +1,6 @@
 /**
- * MINDCRAFT SKILLS — fast dig + cave escape + tight hole escape
+ * MINDCRAFT SKILLS — dig + cave escape + tight hole
+ * RESPEITA bot._dreamBusy (não interrompe pure-survival)
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -71,9 +72,7 @@ export async function breakBlockAt(bot, x, y, z) {
       await race(bot.dig(block, true), 8000);
       return true;
     } catch {
-      try {
-        bot.stopDigging();
-      } catch {}
+      try { bot.stopDigging(); } catch {}
       return false;
     }
   }
@@ -216,7 +215,6 @@ export async function placeBlock(bot, blockType, x, y, z) {
   }
 }
 
-/** Dig vertical shaft UP + human pillar until surface */
 export async function escapeCave(bot) {
   if (!bot?.entity) return false;
   const startY = bot.entity.position.y;
@@ -272,6 +270,7 @@ export async function escapeCave(bot) {
 
 export async function unstuck(bot) {
   if (!bot?.entity || bot._digLocked || bot._dreamPvpActive) return false;
+  if (bot._dreamBusy) return false;
 
   const pf = bot.entity.position.floored();
   let walls = 0;
@@ -327,12 +326,14 @@ export function startMindcraftUnstuck(agent) {
   setInterval(async () => {
     if (running || !bot.entity) return;
     if (bot._dreamPvpActive) return;
+    // BUG FIX: não rouba o pure-survival no meio da coleta
+    if (bot._dreamBusy) return;
+    if (bot._digLocked) return;
 
-    if (bot._digLocked && bot._digLockUntil && Date.now() > bot._digLockUntil) {
+    if (bot._digLockUntil && Date.now() > bot._digLockUntil) {
       bot._digLocked = false;
       try { bot.stopDigging(); } catch {}
     }
-    if (bot._digLocked) return;
 
     const key =
       Math.floor(bot.entity.position.x) +
@@ -357,6 +358,7 @@ export function startMindcraftUnstuck(agent) {
 
     if (still >= 3 || walls >= 2 || headBlocked || bot.entity.position.y < 60) {
       running = true;
+      bot._dreamBusy = true;
       try {
         console.log('[SKILL] force unstuck still=' + still + ' walls=' + walls);
         await unstuck(bot);
@@ -365,11 +367,12 @@ export function startMindcraftUnstuck(agent) {
         console.warn('[SKILL] escape', (e.message || '').slice(0, 40));
       } finally {
         running = false;
+        bot._dreamBusy = false;
       }
     }
   }, 2500);
 
-  console.log('[SKILL] unstuck + tight escape ON');
+  console.log('[SKILL] unstuck + tight escape ON (respects _dreamBusy)');
 }
 
 export function startMindcraftSkills(agent) {
