@@ -1,5 +1,5 @@
 /**
- * MINDCRAFT-CORE v5 — never freeze on Chatting; force cave escape with pickaxe
+ * MINDCRAFT-CORE v6 — never freeze; force tight escape + surface
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -40,6 +40,22 @@ function freeSlots(bot) {
     return bot.inventory.emptySlotCount();
   } catch {
     return 10;
+  }
+}
+
+function isTight(bot) {
+  try {
+    const p = bot.entity.position.floored();
+    let walls = 0;
+    for (const o of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const b = bot.blockAt(p.offset(o[0], 0, o[1]));
+      if (b && b.boundingBox === 'block') walls++;
+    }
+    const head = bot.blockAt(p.offset(0, 1, 0));
+    const headSolid = head && head.boundingBox === 'block';
+    return walls >= 2 || headSolid;
+  } catch {
+    return false;
   }
 }
 
@@ -195,8 +211,8 @@ function nextGoal(bot) {
   const items = inv(bot);
   const y = bot.entity.position.y;
 
-  // ALWAYS escape first if underground
-  if (y < 58) return { kind: 'surface', label: 'ESCAPE_CAVE' };
+  // ALWAYS escape if tight corridor OR underground
+  if (isTight(bot) || y < 62) return { kind: 'surface', label: 'ESCAPE' };
 
   const logs = count(items, /_log$/);
   const planks = count(items, /_planks$/);
@@ -232,7 +248,11 @@ function nextGoal(bot) {
 async function explore(bot) {
   bot.setControlState('forward', true);
   bot.setControlState('sprint', true);
-  if (Math.random() < 0.4) bot.setControlState('jump', true);
+  if (Math.random() < 0.3 && bot.entity.onGround) {
+    bot.setControlState('jump', true);
+    await sleep(80);
+    bot.setControlState('jump', false);
+  }
   await sleep(1800);
   bot.clearControlStates();
 }
@@ -246,13 +266,10 @@ export function startMindcraftCore(agent) {
 
   const tick = async () => {
     if (running || !bot.entity) return;
-    // NEVER block on "Chatting" / is_processing — only real PvP pauses us
     if (bot._dreamPvpActive) return;
 
-    // if dig stuck > 8s, force unlock
     if (bot._digLocked && bot._digLockUntil && Date.now() > bot._digLockUntil) {
       bot._digLocked = false;
-      bot._digHoldActive = false;
       try {
         bot.stopDigging();
       } catch {}
@@ -261,7 +278,6 @@ export function startMindcraftCore(agent) {
     running = true;
     bot._mcCoreBusy = true;
     try {
-      // clear chat lock every tick
       try {
         if (agent.self_prompter) {
           agent.self_prompter.state = 0;
@@ -269,6 +285,8 @@ export function startMindcraftCore(agent) {
           agent.self_prompter.interrupt = true;
         }
         agent.is_processing = false;
+        if (agent.actions?.resume) agent.actions.resume();
+        if (agent.actions?.unpause) agent.actions.unpause();
       } catch {}
 
       await manageInventory(bot);
@@ -278,11 +296,16 @@ export function startMindcraftCore(agent) {
 
       switch (goal.kind) {
         case 'surface':
-          // equip PICK before digging stone ceiling
           await equipPick(bot);
-          bot._digLocked = false; // never stuck mid-escape
+          bot._digLocked = false;
           if (bot.mc?.escapeCave) await bot.mc.escapeCave();
           else if (bot.mc?.unstuck) await bot.mc.unstuck();
+          else {
+            try {
+              const { escapeTight } = await import('./dig-place.js');
+              await escapeTight(bot);
+            } catch {}
+          }
           break;
         case 'collect':
           await collectType(bot, goal.names, goal.n || 1, goal.tool || 'pick');
@@ -308,7 +331,7 @@ export function startMindcraftCore(agent) {
     }
   };
 
-  setInterval(tick, 3500);
-  setTimeout(tick, 1500);
-  console.log('[MC] core v5 ON — ignore Chatting, force escape with pick');
+  setInterval(tick, 2800);
+  setTimeout(tick, 1200);
+  console.log('[MC] core v6 ON — tight escape + surface priority');
 }
