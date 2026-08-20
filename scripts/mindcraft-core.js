@@ -1,5 +1,5 @@
 /**
- * MINDCRAFT-CORE v4 — fast dig + PRIORITY leave cave
+ * MINDCRAFT-CORE v5 — never freeze on Chatting; force cave escape with pickaxe
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -66,16 +66,29 @@ async function manageInventory(bot) {
   }
 }
 
+async function equipPick(bot) {
+  const items = inv(bot);
+  const tool =
+    items.find((i) => /netherite_pickaxe|diamond_pickaxe/.test(i.name)) ||
+    items.find((i) => /iron_pickaxe/.test(i.name)) ||
+    items.find((i) => /stone_pickaxe/.test(i.name)) ||
+    items.find((i) => /wooden_pickaxe|golden_pickaxe/.test(i.name));
+  if (tool) {
+    try {
+      await bot.equip(tool, 'hand');
+      return true;
+    } catch {}
+  }
+  return false;
+}
+
 async function equipBest(bot, forWhat = 'pick') {
+  if (forWhat === 'pick') return equipPick(bot);
   const items = inv(bot);
   let tool =
     forWhat === 'axe'
       ? items.find((i) => /netherite_axe|diamond_axe|iron_axe|stone_axe|wooden_axe/.test(i.name))
-      : forWhat === 'sword'
-        ? items.find((i) => /_sword$/.test(i.name))
-        : items.find((i) =>
-            /netherite_pickaxe|diamond_pickaxe|iron_pickaxe|stone_pickaxe|wooden_pickaxe/.test(i.name)
-          );
+      : items.find((i) => /_sword$/.test(i.name));
   if (tool) {
     try {
       await bot.equip(tool, 'hand');
@@ -98,7 +111,6 @@ async function collectType(bot, names, howMany = 1, toolHint = 'pick') {
   const set = new Set(names);
   let got = 0;
   for (let i = 0; i < howMany; i++) {
-    if (bot._digLocked) break;
     const block = bot.findBlock({ matching: (b) => b && set.has(b.name), maxDistance: 32 });
     if (!block) break;
     if (bot.mc?.goToPosition) await bot.mc.goToPosition(block.position.x, block.position.y, block.position.z, 2);
@@ -120,7 +132,6 @@ async function craft(bot, itemName, qty = 1) {
     if (!recipes?.length) recipes = bot.recipesFor(item.id, null, 1, true);
     if (!recipes?.length) return false;
     await bot.craft(recipes[0], qty, table || null);
-    console.log('[MC] craft', itemName);
     return true;
   } catch {
     return false;
@@ -184,10 +195,8 @@ function nextGoal(bot) {
   const items = inv(bot);
   const y = bot.entity.position.y;
 
-  // PRIORITY #1: leave cave — never stay underground for hours
-  if (y < 55) {
-    return { kind: 'surface', label: 'ESCAPE_CAVE' };
-  }
+  // ALWAYS escape first if underground
+  if (y < 58) return { kind: 'surface', label: 'ESCAPE_CAVE' };
 
   const logs = count(items, /_log$/);
   const planks = count(items, /_planks$/);
@@ -237,10 +246,31 @@ export function startMindcraftCore(agent) {
 
   const tick = async () => {
     if (running || !bot.entity) return;
-    if (bot._dreamPvpActive || bot._digLocked) return;
+    // NEVER block on "Chatting" / is_processing — only real PvP pauses us
+    if (bot._dreamPvpActive) return;
+
+    // if dig stuck > 8s, force unlock
+    if (bot._digLocked && bot._digLockUntil && Date.now() > bot._digLockUntil) {
+      bot._digLocked = false;
+      bot._digHoldActive = false;
+      try {
+        bot.stopDigging();
+      } catch {}
+    }
+
     running = true;
     bot._mcCoreBusy = true;
     try {
+      // clear chat lock every tick
+      try {
+        if (agent.self_prompter) {
+          agent.self_prompter.state = 0;
+          agent.self_prompter.loop_active = false;
+          agent.self_prompter.interrupt = true;
+        }
+        agent.is_processing = false;
+      } catch {}
+
       await manageInventory(bot);
       await eat(bot);
       const goal = nextGoal(bot);
@@ -248,6 +278,9 @@ export function startMindcraftCore(agent) {
 
       switch (goal.kind) {
         case 'surface':
+          // equip PICK before digging stone ceiling
+          await equipPick(bot);
+          bot._digLocked = false; // never stuck mid-escape
           if (bot.mc?.escapeCave) await bot.mc.escapeCave();
           else if (bot.mc?.unstuck) await bot.mc.unstuck();
           break;
@@ -275,8 +308,7 @@ export function startMindcraftCore(agent) {
     }
   };
 
-  // faster loop when needs to escape; always 4s
-  setInterval(tick, 4000);
-  setTimeout(tick, 2000);
-  console.log('[MC] core v4 ON — fast dig + priority cave escape');
+  setInterval(tick, 3500);
+  setTimeout(tick, 1500);
+  console.log('[MC] core v5 ON — ignore Chatting, force escape with pick');
 }
