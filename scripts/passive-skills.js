@@ -1,9 +1,9 @@
 /**
- * PASSIVE BRAIN — pure code + autobot + house. Kills Chatting lock.
+ * PASSIVE BRAIN — pure code + autobot + house. Kills Chatting. Full env scan escape.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
-import { dryFeet, escapeHole } from './escape-hole.js';
+import { dryFeet, escapeHole, isTrapped } from './escape-hole.js';
 import { runAutobotSkills } from './autobot-skills.js';
 import { maybeBuildHouse } from './house-builder.js';
 
@@ -313,8 +313,19 @@ export async function runPassiveSkillTick(agent) {
   const bot = agent.bot;
   if (!bot?.entity || bot._dreamPvpActive) return;
 
-  // Always free body from Chatting/Thinking lock
   killChatting(agent);
+
+  // Full 3D environment scan — escape FIRST if trapped
+  try {
+    if (isTrapped(bot)) {
+      console.log('[PASSIVE] env scan = TRAPPED → full escape');
+      killChatting(agent);
+      try { bot.clearControlStates(); } catch {}
+      if (bot.entity.isInWater) await dryFeet(bot);
+      await escapeHole(bot);
+      return;
+    }
+  } catch {}
 
   try {
     const under = bot.blockAt(bot.entity.position.offset(0, -1, 0));
@@ -336,13 +347,13 @@ export async function runPassiveSkillTick(agent) {
     if (wet || walls >= 2 || stuckIdle || invCount < 8) {
       try { bot.clearControlStates(); } catch {}
       if (wet || walls >= 2) {
-        console.log('[PASSIVE] escape (wet/walls) — killed Chatting');
+        console.log('[PASSIVE] escape (wet/walls)');
         if (wet) await dryFeet(bot);
         await escapeHole(bot);
         return;
       }
       if (stuckIdle) {
-        console.log('[PASSIVE] stuck idle → dig + sprint (killed Chatting)');
+        console.log('[PASSIVE] stuck idle → dig + sprint');
         try {
           const look = bot.blockAtCursor?.(4);
           if (look && look.boundingBox === 'block' && !/bedrock|barrier/.test(look.name || '')) {
@@ -486,5 +497,5 @@ export function startPassiveSkills(agent) {
   };
   setTimeout(tick, 1500);
   setInterval(tick, 2500);
-  console.log('[PASSIVE] BRAIN ON — kills Chatting + house + autobot');
+  console.log('[PASSIVE] BRAIN ON — 3D scan escape + house + autobot');
 }
