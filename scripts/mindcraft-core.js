@@ -1,5 +1,6 @@
 /**
  * MINDCRAFT-CORE v6 — never freeze; force tight escape + surface
+ * Respects bot._dreamBusy from pure-survival (1 action at a time)
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -211,7 +212,6 @@ function nextGoal(bot) {
   const items = inv(bot);
   const y = bot.entity.position.y;
 
-  // ALWAYS escape if tight corridor OR underground
   if (isTight(bot) || y < 62) return { kind: 'surface', label: 'ESCAPE' };
 
   const logs = count(items, /_log$/);
@@ -266,6 +266,7 @@ export function startMindcraftCore(agent) {
 
   const tick = async () => {
     if (running || !bot.entity) return;
+    if (bot._dreamBusy) return; // pure-survival owns current action
     if (bot._dreamPvpActive) return;
 
     if (bot._digLocked && bot._digLockUntil && Date.now() > bot._digLockUntil) {
