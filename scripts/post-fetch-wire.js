@@ -1,3 +1,6 @@
+/**
+ * post-fetch-wire — copia módulos REAIS. Não sobrescreve com alias morto.
+ */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
 import { join, dirname } from 'path';
 
@@ -8,27 +11,45 @@ function copy(from, to) {
   const dst = join(ROOT, to);
   if (!existsSync(src)) {
     console.warn('[post-wire] missing', from);
-    return;
+    return false;
   }
   mkdirSync(dirname(dst), { recursive: true });
   copyFileSync(src, dst);
   console.log('[post-wire] copied', to);
+  return true;
 }
 
-copy('scripts/dig-place.js', 'src/agent/dig-place.js');
-copy('scripts/mindcraft-skills.js', 'src/agent/mindcraft-skills.js');
-copy('scripts/mindcraft-core.js', 'src/agent/mindcraft-core.js');
-copy('scripts/pure-survival.js', 'src/agent/pure-survival.js');
-copy('scripts/plugin-stack.js', 'src/agent/plugin-stack.js');
-copy('scripts/simple-shelter.js', 'src/agent/simple-shelter.js');
-copy('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
-copy('scripts/multiplayer-social.js', 'src/agent/multiplayer-social.js');
-copy('scripts/kill-chat.js', 'src/agent/kill-chat.js');
-copy('scripts/groq-heartbeat.js', 'src/agent/groq-heartbeat.js');
-copy('scripts/mobile-viewer.js', 'src/agent/mobile-viewer.js');
+// --- módulos reais (nunca substituir por alias) ---
+const REAL = [
+  ['scripts/dig-place.js', 'src/agent/dig-place.js'],
+  ['scripts/mindcraft-skills.js', 'src/agent/mindcraft-skills.js'],
+  ['scripts/mindcraft-core.js', 'src/agent/mindcraft-core.js'],
+  ['scripts/pure-survival.js', 'src/agent/pure-survival.js'],
+  ['scripts/plugin-stack.js', 'src/agent/plugin-stack.js'],
+  ['scripts/simple-shelter.js', 'src/agent/simple-shelter.js'],
+  ['scripts/house-builder.js', 'src/agent/house-builder.js'],
+  ['scripts/pvp-combat.js', 'src/agent/pvp-combat.js'],
+  ['scripts/multiplayer-social.js', 'src/agent/multiplayer-social.js'],
+  ['scripts/kill-chat.js', 'src/agent/kill-chat.js'],
+  ['scripts/groq-heartbeat.js', 'src/agent/groq-heartbeat.js'],
+  ['scripts/mobile-viewer.js', 'src/agent/mobile-viewer.js'],
+  ['scripts/escape-hole.js', 'src/agent/escape-hole.js'],
+  ['scripts/nav-tree.js', 'src/agent/nav-tree.js'],
+  ['scripts/nav-stack.js', 'src/agent/nav-stack.js'],
+  ['scripts/passive-skills.js', 'src/agent/passive-skills.js'],
+  ['scripts/env-navigation.js', 'src/agent/env-navigation.js'],
+  ['scripts/setup-movements.js', 'src/agent/setup-movements.js'],
+];
 
-function aliasToSkills(name, exportMap) {
+for (const [from, to] of REAL) copy(from, to);
+
+// Alias SÓ se o arquivo real não existir (fallback)
+function aliasIfMissing(name, exportMap) {
   const dst = join(ROOT, 'src/agent', name);
+  if (existsSync(dst)) {
+    console.log('[post-wire] keep real', name);
+    return;
+  }
   mkdirSync(dirname(dst), { recursive: true });
   const lines = Object.entries(exportMap)
     .map(
@@ -41,20 +62,26 @@ function aliasToSkills(name, exportMap) {
 `
     )
     .join('\n');
-  writeFileSync(dst, `/** Alias → mindcraft-skills */\n${lines}`);
+  writeFileSync(dst, `/** Fallback alias → mindcraft-skills */\n${lines}`);
+  console.log('[post-wire] alias fallback', name);
 }
 
-aliasToSkills('nav-tree.js', { startNavTree: 'startMindcraftUnstuck' });
-aliasToSkills('nav-stack.js', { startNavStack: 'startMindcraftSkills' });
-aliasToSkills('baritone-nav.js', { startBaritoneNav: 'startMindcraftSkills' });
-aliasToSkills('env-navigation.js', { startEnvNavigation: 'startMindcraftUnstuck' });
-aliasToSkills('anti-freeze.js', { startAntiFreeze: 'startMindcraftUnstuck' });
-aliasToSkills('passive-skills.js', { startPassiveSkills: 'startMindcraftSkills' });
-aliasToSkills('escape-hole.js', { startEscapeHole: 'startMindcraftUnstuck' });
-aliasToSkills('task-guard.js', { startTaskGuard: 'startMindcraftSkills' });
+aliasIfMissing('baritone-nav.js', { startBaritoneNav: 'startMindcraftSkills' });
+aliasIfMissing('anti-freeze.js', { startAntiFreeze: 'startMindcraftUnstuck' });
+aliasIfMissing('task-guard.js', { startTaskGuard: 'startMindcraftSkills' });
 
 function aliasToCore(name, exportName) {
   const dst = join(ROOT, 'src/agent', name);
+  // se já copiamos arquivo real grande, não sobrescreve
+  if (existsSync(dst)) {
+    try {
+      const sz = readFileSync(dst, 'utf8').length;
+      if (sz > 500) {
+        console.log('[post-wire] keep real', name, sz);
+        return;
+      }
+    } catch {}
+  }
   mkdirSync(dirname(dst), { recursive: true });
   writeFileSync(
     dst,
@@ -99,7 +126,7 @@ agent = agent.replace(
 
 if (!agent.includes('[DreamBot] MINDCRAFT STACK')) {
   const block = `
-            // [DreamBot] MINDCRAFT STACK — plugins first, then pure sequential
+            // [DreamBot] MINDCRAFT STACK — real modules only
             try {
                 const { startKillChat } = await import('./kill-chat.js');
                 startKillChat(this);
@@ -112,6 +139,10 @@ if (!agent.includes('[DreamBot] MINDCRAFT STACK')) {
                 const { startSimpleShelter } = await import('./simple-shelter.js');
                 startSimpleShelter(this);
             } catch (e) { console.warn('[DreamBot] shelter', e.message); }
+            try {
+                const { startHouseBuilder } = await import('./house-builder.js');
+                startHouseBuilder(this);
+            } catch (e) { console.warn('[DreamBot] house', e.message); }
             try {
                 const { startPureSurvival } = await import('./pure-survival.js');
                 startPureSurvival(this);
@@ -150,4 +181,4 @@ if (!agent.includes('[DreamBot] MINDCRAFT STACK')) {
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] FULL STACK: plugins + pure + mindcraft');
+console.log('[post-wire] REAL modules kept + house-builder wired');
