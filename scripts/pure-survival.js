@@ -1,5 +1,6 @@
 /**
- * pure-survival — 1 ação; liga dig-place + house-builder que já existiam
+ * pure-survival — 1 ação
+ * Prioridade: água → tight → comer → combate → craft → casa → coletar → wander
  */
 
 import pathfinderPkg from 'mineflayer-pathfinder';
@@ -25,6 +26,20 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function race(p, ms) {
+  let t;
+  try {
+    return await Promise.race([
+      p,
+      new Promise((_, j) => {
+        t = setTimeout(() => j(new Error('timeout')), ms);
+      }),
+    ]);
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
+
 function items(bot) {
   try { return bot.inventory.items(); } catch { return []; }
 }
@@ -40,11 +55,19 @@ function findItem(bot, re) {
 function ensurePlugins(bot) {
   try {
     if (!bot.pathfinder) bot.loadPlugin(pathfinder);
-    const mv = new Movements(bot);
-    mv.canDig = true;
-    mv.allowSprinting = true;
-    mv.allowParkour = true;
-    bot.pathfinder.setMovements(mv);
+    try {
+      const { setupDreamBotMovements } = require('./setup-movements.js');
+      setupDreamBotMovements(bot);
+    } catch {
+      const mv = new Movements(bot);
+      mv.canDig = true;
+      mv.digCost = 1.4;
+      mv.liquidCost = 8;
+      mv.allowSprinting = true;
+      mv.allowParkour = true;
+      mv.maxDropDown = 3;
+      bot.pathfinder.setMovements(mv);
+    }
   } catch (e) {
     console.warn('[PURE] pathfinder', e.message);
   }
@@ -53,10 +76,6 @@ function ensurePlugins(bot) {
       const baritone = require('@miner-org/mineflayer-baritone');
       const loader = baritone.loader || baritone.default?.loader || baritone;
       if (typeof loader === 'function') bot.loadPlugin(loader);
-    }
-    if (bot.ashfinder?.config) {
-      bot.ashfinder.config.parkour = true;
-      bot.ashfinder.config.swimming = true;
     }
   } catch {}
   try {
@@ -104,13 +123,13 @@ async function gotoNear(bot, x, y, z, range = 2) {
       const baritone = require('@miner-org/mineflayer-baritone');
       const G = baritone.goals || {};
       if (G.GoalNear) {
-        await bot.ashfinder.goto(new G.GoalNear(new Vec3(x, y, z), range));
+        await race(bot.ashfinder.goto(new G.GoalNear(new Vec3(x, y, z), range)), 20000);
         return true;
       }
     }
   } catch {}
   try {
-    await bot.pathfinder.goto(new pfGoals.GoalNear(x, y, z, range));
+    await race(bot.pathfinder.goto(new pfGoals.GoalNear(x, y, z, range)), 15000);
     return true;
   } catch {
     try {
@@ -167,22 +186,23 @@ async function doCollect(bot, block) {
       try { await bot.tool.equipForBlock(block); } catch {}
     }
     if (bot.collectBlock?.collect) {
-      await bot.collectBlock.collect(block);
+      // timeout evita trava eterna no collect
+      await race(bot.collectBlock.collect(block), 20000);
       return true;
     }
     await gotoNear(bot, block.position.x, block.position.y, block.position.z, 2);
     const tool = findItem(bot, /_pickaxe|_axe|_shovel/);
     if (tool) await bot.equip(tool, 'hand');
-    await bot.dig(block);
+    await race(bot.dig(block, true), 9000);
     return true;
   } catch (e) {
     console.warn('[PURE] collect', String(e.message || e).slice(0, 60));
     await stopNav(bot);
+    try { bot.stopDigging(); } catch {}
     return false;
   }
 }
 
-/** BUG FIX progresso: crafting_table no inventário precisa estar no chão */
 async function placeCraftingTable(bot) {
   const tableItem = findItem(bot, /^crafting_table$/);
   if (!tableItem) return false;
@@ -191,7 +211,6 @@ async function placeCraftingTable(bot) {
     maxDistance: 12,
   });
   if (already) return false;
-
   try {
     await bot.equip(tableItem, 'hand');
     const feet = bot.entity.position.floored();
@@ -202,8 +221,7 @@ async function placeCraftingTable(bot) {
     console.log('[PURE] placed crafting_table');
     await sleep(300);
     return true;
-  } catch (e) {
-    console.warn('[PURE] place table', String(e.message || e).slice(0, 40));
+  } catch {
     return false;
   }
 }
@@ -217,7 +235,6 @@ async function tryCraft(bot, itemName, qty = 1) {
       matching: mcData.blocksByName.crafting_table?.id,
       maxDistance: 16,
     });
-    // se tem mesa no inv e não no mundo → coloca
     if (!tableBlock && findItem(bot, /^crafting_table$/)) {
       await placeCraftingTable(bot);
       tableBlock = bot.findBlock({
@@ -259,7 +276,6 @@ async function doCraftProgress(bot) {
   if (planks >= 4 && !hasTable) {
     if (await tryCraft(bot, 'crafting_table', 1)) return true;
   }
-  // mesa no inventário mas não no mundo
   if (findItem(bot, /^crafting_table$/) && !bot.findBlock({ matching: (b) => b?.name === 'crafting_table', maxDistance: 12 })) {
     if (await placeCraftingTable(bot)) return true;
   }
@@ -341,7 +357,16 @@ export function startPureSurvival(agent) {
     busy = true;
     bot._dreamBusy = true;
     try {
-      // 0) ESCAPE — código real dig-place (já existia, agora chamado)
+      // 0) ÁGUA primeiro (não place under feet — pathfinder #54)
+      try {
+        const { isInWater, escapeWater } = await import('./water-escape.js');
+        if (isInWater(bot)) {
+          await escapeWater(bot);
+          return;
+        }
+      } catch {}
+
+      // 1) corredor / cave
       if (isTight(bot) || bot.entity.position.y < 58) {
         try {
           const { escapeTight } = await import('./dig-place.js');
@@ -375,7 +400,6 @@ export function startPureSurvival(agent) {
 
       if (await doCraftProgress(bot)) return;
 
-      // house-builder real (estava morto)
       try {
         const { maybeBuildHouse } = await import('./house-builder.js');
         if (await maybeBuildHouse(bot)) return;
@@ -449,5 +473,5 @@ export function startPureSurvival(agent) {
     }
   });
 
-  console.log('[PURE] wired dig-place + house-builder + place table | 1 ação');
+  console.log('[PURE] water+tight+craft+house+collect | timeout 20s | 1 ação');
 }
