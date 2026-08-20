@@ -1,5 +1,5 @@
 /**
- * PASSIVE BRAIN — pure code + autobot + house builder.
+ * PASSIVE BRAIN — pure code + autobot + house. Kills Chatting lock.
  */
 import { createRequire } from 'module';
 import pathfinder from 'mineflayer-pathfinder';
@@ -14,7 +14,6 @@ const Vec3 = require('vec3').Vec3;
 const WOOD = ['oak_log','birch_log','spruce_log','jungle_log','acacia_log','dark_oak_log','mangrove_log','cherry_log','pale_oak_log'];
 const FOOD_RE = /cooked_|bread|apple|carrot|potato|beef|pork|chicken|mutton|cod|salmon|melon|sweet_berries|glow_berries|cookie|pie|stew|mushroom_stew|rabbit|tropical_fish/;
 const BUILD_RE = /dirt|cobblestone|netherrack|planks|stone$|andesite|granite|diorite|tuff|deepslate/;
-const FOOD_MOB = /cow|pig|chicken|sheep|rabbit|cod|salmon/;
 
 const craftCooldown = new Map();
 
@@ -155,15 +154,14 @@ async function eatIfNeeded(bot) {
   try {
     await bot.equip(food, 'hand');
     await race(bot.consume(), 5000);
-    console.log('[PASSIVE] EAT', food.name, 'hp', bot.health, 'food', bot.food);
+    console.log('[PASSIVE] EAT', food.name);
     return true;
   } catch { return false; }
 }
 
 async function emergencyFood(bot) {
-  const critical = bot.health <= 8 || bot.food <= 6;
-  if (!critical) return false;
-  console.log('[PASSIVE] EMERGENCY food hp', bot.health, 'hunger', bot.food);
+  if (bot.health > 8 && bot.food > 6) return false;
+  console.log('[PASSIVE] EMERGENCY food');
   if (await eatIfNeeded(bot)) return true;
   return true;
 }
@@ -177,19 +175,12 @@ async function ensureTableNearby(bot) {
     await bot.equip(item, 'hand');
     const ref = bot.blockAt(bot.entity.position.offset(0, -1, 0));
     if (!ref) return null;
-    const yaw = bot.entity.yaw;
-    const fx = Math.round(-Math.sin(yaw));
-    const fz = Math.round(-Math.cos(yaw));
-    const against = bot.blockAt(bot.entity.position.offset(fx, -1, fz)) || ref;
-    await bot.lookAt(against.position.offset(0.5, 1, 0.5), true);
-    await race(bot.placeBlock(against, new Vec3(0, 1, 0)), 4000);
+    await bot.lookAt(ref.position.offset(0.5, 1, 0.5), true);
+    await race(bot.placeBlock(ref, new Vec3(0, 1, 0)), 4000);
     console.log('[PASSIVE] placed crafting_table');
     await sleep(400);
     return bot.findBlock({ matching: b => b?.name === 'crafting_table', maxDistance: 4 });
-  } catch (e) {
-    console.warn('[PASSIVE] place table', (e.message || '').slice(0, 40));
-    return null;
-  }
+  } catch { return null; }
 }
 
 async function craft(bot, recipeName, n = 1) {
@@ -202,35 +193,23 @@ async function craft(bot, recipeName, n = 1) {
     let table = null;
     if (needsTable) {
       table = await ensureTableNearby(bot);
-      if (!table && !has(bot, 'crafting_table')) {
-        markCraftFail(recipeName);
-        return false;
-      }
+      if (!table && !has(bot, 'crafting_table')) { markCraftFail(recipeName); return false; }
       if (!table) table = await ensureTableNearby(bot);
     }
     const recipes = bot.recipesFor(item.id, null, 1, table || null);
     if (!recipes?.length) { markCraftFail(recipeName); return false; }
     await race(bot.craft(recipes[0], n, table || null), 15000);
     markCraftOk(recipeName);
-    console.log('[PASSIVE] craft OK', recipeName, 'x' + n);
+    console.log('[PASSIVE] craft OK', recipeName);
     return true;
   } catch (e) {
     markCraftFail(recipeName);
-    console.warn('[PASSIVE] craft fail', recipeName, (e.message || '').slice(0, 30));
     return false;
   }
 }
 
 async function equipBest(bot, kind) {
-  const rank = (n) => {
-    if (/netherite/.test(n)) return 6;
-    if (/diamond/.test(n)) return 5;
-    if (/iron/.test(n)) return 4;
-    if (/stone/.test(n)) return 3;
-    if (/gold/.test(n)) return 2;
-    if (/wood|wooden/.test(n)) return 1;
-    return 0;
-  };
+  const rank = (n) => /netherite/.test(n) ? 6 : /diamond/.test(n) ? 5 : /iron/.test(n) ? 4 : /stone/.test(n) ? 3 : /gold/.test(n) ? 2 : /wood|wooden/.test(n) ? 1 : 0;
   const list = items(bot).filter(i => new RegExp(kind).test(i.name));
   if (!list.length) return false;
   list.sort((a, b) => rank(b.name) - rank(a.name));
@@ -259,11 +238,8 @@ async function replaceBrokenTools(bot) {
   const anySword = hasRe(bot, /sword/);
   const ironPick = hasRe(bot, /iron_pickaxe/);
   const diaPick = hasRe(bot, /diamond_pickaxe/);
-
   if (!anyPick || !anyAxe || !anySword) clearToolCraftCooldown();
-
   if (!anyPick) {
-    console.log('[PASSIVE] pickaxe BROKEN/missing → replace');
     if (diamonds >= 3 && sticks >= 2 && await craft(bot, 'diamond_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
     if (iron >= 3 && sticks >= 2 && await craft(bot, 'iron_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
     if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return true; }
@@ -275,12 +251,10 @@ async function replaceBrokenTools(bot) {
     if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_pickaxe', 1)) return true;
   }
   if (!anyAxe) {
-    if (iron >= 3 && sticks >= 2 && await craft(bot, 'iron_axe', 1)) return true;
     if (cobble >= 3 && sticks >= 2 && await craft(bot, 'stone_axe', 1)) return true;
     if (planks >= 3 && sticks >= 2 && await craft(bot, 'wooden_axe', 1)) return true;
   }
   if (!anySword) {
-    if (iron >= 2 && sticks >= 1 && await craft(bot, 'iron_sword', 1)) return true;
     if (cobble >= 2 && sticks >= 1 && await craft(bot, 'stone_sword', 1)) return true;
     if (planks >= 2 && sticks >= 1 && await craft(bot, 'wooden_sword', 1)) return true;
   }
@@ -296,27 +270,18 @@ function enableAutoJump(bot) {
       if (!bot.entity || bot._dreamPvpActive) return;
       if (bot.targetDigBlock) return;
       const moving = !!(bot.controlState.forward || bot.pathfinder?.isMoving?.());
-      if (moving && bot.entity.onGround && !bot.entity.isInWater) {
-        bot.setControlState('sprint', true);
-      }
+      if (moving && bot.entity.onGround && !bot.entity.isInWater) bot.setControlState('sprint', true);
       const yaw = bot.entity.yaw;
-      const dx = -Math.sin(yaw);
-      const dz = -Math.cos(yaw);
+      const dx = -Math.sin(yaw), dz = -Math.cos(yaw);
       const front = bot.blockAt(bot.entity.position.offset(dx * 0.9, 0, dz * 0.9));
       const frontUp = bot.blockAt(bot.entity.position.offset(dx * 0.9, 1, dz * 0.9));
       const blocked = front && front.boundingBox === 'block';
       const canStep = blocked && (!frontUp || frontUp.boundingBox !== 'block');
-      const wallAhead = blocked && frontUp && frontUp.boundingBox === 'block';
       const now = Date.now();
       if (canStep && bot.entity.onGround && moving && now - lastJump > 250) {
         bot.setControlState('jump', true);
         lastJump = now;
         setTimeout(() => { try { bot.setControlState('jump', false); } catch {} }, 140);
-      }
-      if (wallAhead && bot.entity.onGround && now - lastJump > 600) {
-        bot.setControlState('jump', true);
-        lastJump = now;
-        setTimeout(() => { try { bot.setControlState('jump', false); } catch {} }, 120);
       }
     } catch {}
   });
@@ -336,9 +301,20 @@ function watchToolBreak(bot) {
   }, 2000);
 }
 
+function killChatting(agent) {
+  try { agent.self_prompter?.stopLoop?.(); } catch {}
+  try { agent.self_prompter?.stop?.(); } catch {}
+  try { if (agent.self_prompter) agent.self_prompter.loop_active = false; } catch {}
+  try { agent.actions?.stop?.(); } catch {}
+  try { agent.coder?.stop?.(); } catch {}
+}
+
 export async function runPassiveSkillTick(agent) {
   const bot = agent.bot;
   if (!bot?.entity || bot._dreamPvpActive) return;
+
+  // Always free body from Chatting/Thinking lock
+  killChatting(agent);
 
   try {
     const under = bot.blockAt(bot.entity.position.offset(0, -1, 0));
@@ -358,17 +334,15 @@ export async function runPassiveSkillTick(agent) {
     const stuckIdle = bot._passiveStillTicks >= 2;
 
     if (wet || walls >= 2 || stuckIdle || invCount < 8) {
-      try { agent.actions?.stop?.(); } catch {}
-      try { agent.self_prompter?.stopLoop?.(); } catch {}
-      try { agent.coder?.stop?.(); } catch {}
       try { bot.clearControlStates(); } catch {}
       if (wet || walls >= 2) {
+        console.log('[PASSIVE] escape (wet/walls) — killed Chatting');
         if (wet) await dryFeet(bot);
         await escapeHole(bot);
         return;
       }
       if (stuckIdle) {
-        console.log('[PASSIVE] stuck idle → dig face + sprint');
+        console.log('[PASSIVE] stuck idle → dig + sprint (killed Chatting)');
         try {
           const look = bot.blockAtCursor?.(4);
           if (look && look.boundingBox === 'block' && !/bedrock|barrier/.test(look.name || '')) {
@@ -390,7 +364,6 @@ export async function runPassiveSkillTick(agent) {
     try {
       const look = bot.blockAtCursor?.(4);
       if (look && (/_log$/.test(look.name) || look.name === 'stone' || look.name === 'cobblestone' || /ore/.test(look.name))) {
-        console.log('[PASSIVE] dig in face', look.name);
         await dig(bot, look);
         return;
       }
@@ -428,7 +401,6 @@ export async function runPassiveSkillTick(agent) {
     console.log('[PASSIVE] need wood');
     if (await collect(bot, WOOD, 3, 40)) return;
   }
-
   if (logs >= 1 && planks < 32) {
     const logItem = items(bot).find(i => /_log$/.test(i.name));
     if (logItem) {
@@ -436,59 +408,44 @@ export async function runPassiveSkillTick(agent) {
       if (await craft(bot, recipe, Math.min(4, logs))) return;
     }
   }
-
   if (!hasTableItem && !tableNear && planks >= 4) {
     if (await craft(bot, 'crafting_table', 1)) return;
   }
   if (hasTableItem && !tableNear) await ensureTableNearby(bot);
-
   if (sticks < 16 && planks >= 2) {
     if (await craft(bot, 'stick', 4)) return;
   }
-
   if (planks >= 3 && sticks >= 2 && !anyPick && canTryCraft('wooden_pickaxe')) {
     if (await craft(bot, 'wooden_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
-
   if (anyPick && cobble < 32) {
     console.log('[PASSIVE] mine stone');
     await equipBest(bot, 'pickaxe');
     if (await collect(bot, ['stone', 'cobblestone', 'deepslate'], 6, 28)) return;
   }
-
   if (cobble >= 3 && sticks >= 2 && !stonePick && !ironPick && !diaPick && canTryCraft('stone_pickaxe')) {
     if (await craft(bot, 'stone_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
-
   if (cobble >= 8 && !hasFurnace && canTryCraft('furnace')) {
     if (await craft(bot, 'furnace', 1)) return;
   }
-
   if (!has(bot, 'chest') && planks >= 8 && canTryCraft('chest')) {
     if (await craft(bot, 'chest', 1)) return;
   }
-
   if (stonePick || ironPick || diaPick) {
     if (coal < 10 && await collect(bot, ['coal_ore', 'deepslate_coal_ore'], 2, 24)) return;
     if (rawIron + iron < 8 && await collect(bot, ['iron_ore', 'deepslate_iron_ore'], 2, 24)) return;
   }
-
   if (iron >= 3 && sticks >= 2 && !ironPick && !diaPick && canTryCraft('iron_pickaxe')) {
     if (await craft(bot, 'iron_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
-
-  if (ironPick || diaPick) {
-    if (diamonds < 5) {
-      console.log('[PASSIVE] hunt diamonds');
-      await equipBest(bot, 'pickaxe');
-      if (await collect(bot, ['diamond_ore', 'deepslate_diamond_ore'], 1, 40)) return;
-    }
+  if ((ironPick || diaPick) && diamonds < 5) {
+    await equipBest(bot, 'pickaxe');
+    if (await collect(bot, ['diamond_ore', 'deepslate_diamond_ore'], 1, 40)) return;
   }
-
   if (diamonds >= 3 && sticks >= 2 && !diaPick && canTryCraft('diamond_pickaxe')) {
     if (await craft(bot, 'diamond_pickaxe', 1)) { await equipBest(bot, 'pickaxe'); return; }
   }
-
   if (coal >= 1 && sticks >= 1 && count(bot, 'torch') < 20 && canTryCraft('torch')) {
     if (await craft(bot, 'torch', 4)) return;
   }
@@ -508,20 +465,11 @@ export async function runPassiveSkillTick(agent) {
 export function startPassiveSkills(agent) {
   if (agent._passiveSkillsStarted) return;
   agent._passiveSkillsStarted = true;
-
   const bot = agent.bot;
   if (bot) {
-    if (bot.entity) {
-      enableAutoJump(bot);
-      watchToolBreak(bot);
-    } else {
-      bot.once('spawn', () => {
-        enableAutoJump(bot);
-        watchToolBreak(bot);
-      });
-    }
+    if (bot.entity) { enableAutoJump(bot); watchToolBreak(bot); }
+    else bot.once('spawn', () => { enableAutoJump(bot); watchToolBreak(bot); });
   }
-
   const tick = async () => {
     try {
       if (!agent.bot?.entity) return;
@@ -536,8 +484,7 @@ export function startPassiveSkills(agent) {
       agent._passiveRunning = false;
     }
   };
-
   setTimeout(tick, 1500);
   setInterval(tick, 2500);
-  console.log('[PASSIVE] BRAIN ON — house + autobot + sprint');
+  console.log('[PASSIVE] BRAIN ON — kills Chatting + house + autobot');
 }
