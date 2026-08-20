@@ -1,6 +1,5 @@
 /**
- * Full 3D environment scan + ordered escape.
- * Scans every block around the bot, picks best exit, digs/pillars toward freedom.
+ * Full 3D environment scan + ordered escape from 1-wide stone corridors.
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -55,36 +54,40 @@ async function equipFor(bot, block) {
   }
 }
 
-async function digHold(bot, block, tries = 4) {
+/** Hand dig of stone needs ~7.5s — allow 20s per try */
+async function digHold(bot, block, tries = 5) {
   if (!block || isAirName(block.name)) return false;
   if (HARD.test(block.name || '')) return false;
 
   const targetPos = block.position.clone();
+  const hasPick = items(bot).some((i) => /_pickaxe$/.test(i.name));
+  const isStone = /stone|cobble|deepslate|granite|andesite|diorite|tuff/.test(block.name || '');
+  const timeout = !hasPick && isStone ? 22000 : 12000;
 
   for (let t = 0; t < tries; t++) {
     try {
       try { bot.clearControlStates(); } catch {}
       try { bot.pathfinder?.setGoal?.(null); } catch {}
       try { bot.stopDigging(); } catch {}
-      await sleep(30);
+      await sleep(40);
 
       const live = bot.blockAt(targetPos);
       if (!live || isAirName(live.name)) return true;
 
       await equipFor(bot, live);
       await bot.lookAt(live.position.offset(0.5, 0.5, 0.5), true);
-      await sleep(40);
+      await sleep(50);
 
       await Promise.race([
         bot.dig(live, true),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), 10000)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('dig-timeout')), timeout)),
       ]);
 
       const after = bot.blockAt(targetPos);
       if (!after || isAirName(after.name)) return true;
     } catch {
       try { bot.stopDigging(); } catch {}
-      await sleep(80);
+      await sleep(100);
     }
   }
   return false;
@@ -209,6 +212,10 @@ function planEscape(scan) {
 
   if (scan.walls >= 2) {
     plans.push({ type: 'pillar', score: 55 + scan.walls * 5, dir: { dx: 0, dz: 0 } });
+    // force dig_dir even if all stone
+    for (const d of dirs) {
+      plans.push({ type: 'dig_dir', score: 45, dir: d, depth: 3 });
+    }
   }
 
   if (scan.wet || scan.water > 3) {
@@ -231,7 +238,7 @@ async function digStaircase(bot, dx, dz, steps = 4) {
     for (const pos of [bodyPos, headPos, ceilPos]) {
       const b = bot.blockAt(pos);
       if (b && !isAirName(b.name) && !HARD.test(b.name || '')) {
-        console.log('[ESCAPE] dig ordered', b.name, '@', pos.x - origin.x, pos.y - origin.y, pos.z - origin.z);
+        console.log('[ESCAPE] dig ordered', b.name);
         await digHold(bot, b);
       }
     }
@@ -333,7 +340,7 @@ export async function escapeHole(bot) {
     );
 
     const plan = planEscape(scan);
-    console.log('[ESCAPE] plan', plan.type, 'score=' + plan.score, plan.dir || '');
+    console.log('[ESCAPE] plan', plan.type, 'score=' + plan.score);
 
     try {
       bot.clearControlStates();
