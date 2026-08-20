@@ -21,6 +21,7 @@ copy('scripts/escape-hole.js', 'src/agent/escape-hole.js');
 copy('scripts/autobot-skills.js', 'src/agent/autobot-skills.js');
 copy('scripts/house-builder.js', 'src/agent/house-builder.js');
 copy('scripts/danger-detect.js', 'src/agent/danger-detect.js');
+copy('scripts/env-navigation.js', 'src/agent/env-navigation.js');
 copy('scripts/nav-stack.js', 'src/agent/nav-stack.js');
 copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
 copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
@@ -81,6 +82,10 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
                 startDangerDetect(this);
             } catch (e) { console.warn('[DreamBot] danger', e.message); }
             try {
+                const { startEnvNavigation } = await import('./env-navigation.js');
+                startEnvNavigation(this);
+            } catch (e) { console.warn('[DreamBot] env-nav', e.message); }
+            try {
                 const { startKonekoBehaviors } = await import('./koneko-behaviors.js');
                 await startKonekoBehaviors(this);
             } catch (e) { console.warn('[DreamBot] koneko', e.message); }
@@ -117,5 +122,17 @@ if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startDangerDetec
   );
 }
 
+if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startEnvNavigation')) {
+  agent = agent.replace(
+    /startDangerDetect\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] danger', e\.message\); \}/,
+    `startDangerDetect(this);
+            } catch (e) { console.warn('[DreamBot] danger', e.message); }
+            try {
+                const { startEnvNavigation } = await import('./env-navigation.js');
+                startEnvNavigation(this);
+            } catch (e) { console.warn('[DreamBot] env-nav', e.message); }`
+  );
+}
+
 writeFileSync(agentPath, agent);
-console.log('[post-wire] full stack + danger-detect');
+console.log('[post-wire] full stack + env-navigation');
