@@ -33,6 +33,7 @@ copy('scripts/koneko-behaviors.js', 'src/agent/koneko-behaviors.js');
 copy('scripts/mobile-viewer.js', 'src/agent/mobile-viewer.js');
 copy('scripts/nav-tree.js', 'src/agent/nav-tree.js');
 copy('scripts/voyager-skills.js', 'src/agent/voyager-skills.js');
+copy('scripts/multiplayer-social.js', 'src/agent/multiplayer-social.js');
 
 const agentPath = join(ROOT, 'src/agent/agent.js');
 if (!existsSync(agentPath)) process.exit(0);
@@ -72,6 +73,10 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
                 const { startVoyagerCurriculum } = await import('./voyager-skills.js');
                 startVoyagerCurriculum(this);
             } catch (e) { console.warn('[DreamBot] curriculum', e.message); }
+            try {
+                const { startMultiplayerSocial } = await import('./multiplayer-social.js');
+                startMultiplayerSocial(this);
+            } catch (e) { console.warn('[DreamBot] mp', e.message); }
             try {
                 const { startNavStack } = await import('./nav-stack.js');
                 await startNavStack(this);
@@ -130,7 +135,6 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
   }
 }
 
-// Ensure curriculum is wired even if FULL STACK already exists
 if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startVoyagerCurriculum')) {
   agent = agent.replace(
     /startPassiveSkills\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] passive', e\.message\); \}/,
@@ -143,31 +147,39 @@ if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startVoyagerCurr
   );
 }
 
+if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startMultiplayerSocial')) {
+  agent = agent.replace(
+    /startVoyagerCurriculum\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] curriculum', e\.message\); \}/,
+    `startVoyagerCurriculum(this);
+            } catch (e) { console.warn('[DreamBot] curriculum', e.message); }
+            try {
+                const { startMultiplayerSocial } = await import('./multiplayer-social.js');
+                startMultiplayerSocial(this);
+            } catch (e) { console.warn('[DreamBot] mp', e.message); }`
+  );
+  // fallback after pvp
+  if (!agent.includes('startMultiplayerSocial')) {
+    agent = agent.replace(
+      /startPvpCombat\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] pvp', e\.message\); \}/,
+      `startPvpCombat(this);
+            } catch (e) { console.warn('[DreamBot] pvp', e.message); }
+            try {
+                const { startMultiplayerSocial } = await import('./multiplayer-social.js');
+                startMultiplayerSocial(this);
+            } catch (e) { console.warn('[DreamBot] mp', e.message); }`
+    );
+  }
+}
+
 if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startNavTree')) {
   agent = agent.replace(
-    /startNavStack\(this\);\s*\} catch \(e\) \{[\s\S]*?console\.warn\('\[DreamBot\] nav', e2?\.message\); \}\s*\}/,
-    `startNavStack(this);
-            } catch (e) {
-                try {
-                    const { startBaritoneNav } = await import('./baritone-nav.js');
-                    await startBaritoneNav(this);
-                } catch (e2) { console.warn('[DreamBot] nav', e2.message); }
-            }
-            try {
-                const { startNavTree } = await import('./nav-tree.js');
-                startNavTree(this);
-            } catch (e) { console.warn('[DreamBot] navtree', e.message); }`
-  );
-  if (!agent.includes('startNavTree')) {
-    agent = agent.replace(
-      /startPvpCombat\(this\);/,
-      `try {
+    /startPvpCombat\(this\);/,
+    `try {
                 const { startNavTree } = await import('./nav-tree.js');
                 startNavTree(this);
             } catch (e) { console.warn('[DreamBot] navtree', e.message); }
             startPvpCombat(this);`
-    );
-  }
+  );
 }
 
 if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startDangerDetect')) {
@@ -219,4 +231,4 @@ if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startGroqHeartbe
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] full stack + curriculum + nav-tree');
+console.log('[post-wire] full stack + curriculum + multiplayer + nav-tree');
