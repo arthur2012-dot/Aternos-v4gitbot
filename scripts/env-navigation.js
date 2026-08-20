@@ -1,5 +1,5 @@
 /**
- * Auto-jump + block traversal + advanced environment detection.
+ * Auto-jump + block traversal. Respects bot._digLocked everywhere.
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -117,7 +117,8 @@ export function enableAdvancedMovement(bot) {
     try {
       if (!bot.entity) return;
       if (bot._dreamPvpActive || bot._escapeBusy || bot._dangerBusy) return;
-      if (bot.targetDigBlock) return;
+      // GLOBAL dig lock — do nothing that moves head
+      if (bot._digLocked || bot.targetDigBlock) return;
 
       const moving =
         !!(bot.controlState.forward || bot.pathfinder?.isMoving?.() || bot._navBusy);
@@ -155,7 +156,7 @@ export function enableAdvancedMovement(bot) {
             try { bot.setControlState('jump', false); } catch {}
           }, 180);
         }
-      } else if (decision.action === 'dig_soft' && moving && now - lastDig > 1500) {
+      } else if (decision.action === 'dig_soft' && moving && now - lastDig > 2000) {
         lastDig = now;
         const yaw = bot.entity.yaw;
         const dx = -Math.sin(yaw);
@@ -168,11 +169,15 @@ export function enableAdvancedMovement(bot) {
     } catch {}
   });
 
-  console.log('[NAV] advanced movement ON — autojump + step + gap + sprint');
+  console.log('[NAV] advanced movement ON — dig-lock aware');
 }
 
 export async function processPendingFaceDig(bot) {
   if (!bot?._pendingFaceDig) return false;
+  if (bot._digLocked) {
+    bot._pendingFaceDig = null;
+    return false;
+  }
   const pos = bot._pendingFaceDig;
   bot._pendingFaceDig = null;
   try {
@@ -180,24 +185,48 @@ export async function processPendingFaceDig(bot) {
     if (!b || !isSolid(b)) return false;
     if (!SOFT.test(b.name || '')) return false;
     console.log('[NAV] dig soft path', b.name);
-    const inv = bot.inventory.items();
-    let tool =
-      /_log$|planks|leaves/.test(b.name)
-        ? inv.find((i) => /_axe$/.test(i.name))
-        : /dirt|sand|gravel|grass|clay|mud|snow/.test(b.name)
-          ? inv.find((i) => /_shovel$/.test(i.name))
-          : inv.find((i) => /_pickaxe$/.test(i.name));
-    if (tool) {
-      try { await bot.equip(tool, 'hand'); } catch {}
+
+    // use dig lock
+    bot._digLocked = true;
+    bot._digLockPos = pos.clone();
+    bot._digLockUntil = Date.now() + 12000;
+    const center = pos.offset(0.5, 0.5, 0.5);
+
+    try {
+      const inv = bot.inventory.items();
+      let tool =
+        /_log$|planks|leaves/.test(b.name)
+          ? inv.find((i) => /_axe$/.test(i.name))
+          : /dirt|sand|gravel|grass|clay|mud|snow/.test(b.name)
+            ? inv.find((i) => /_shovel$/.test(i.name))
+            : inv.find((i) => /_pickaxe$/.test(i.name));
+      if (tool) {
+        try { await bot.equip(tool, 'hand'); } catch {}
+      }
+      await bot.lookAt(center, true);
+      const lookIv = setInterval(() => {
+        try { bot.lookAt(center, true).catch(() => {}); } catch {}
+      }, 200);
+      try {
+        await Promise.race([
+          bot.dig(b, true),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 10000)),
+        ]);
+      } catch {
+        try { bot.stopDigging(); } catch {}
+      } finally {
+        clearInterval(lookIv);
+      }
+      return true;
+    } finally {
+      bot._digLocked = false;
+      bot._digLockPos = null;
+      bot._digLockUntil = 0;
     }
-    await bot.lookAt(b.position.offset(0.5, 0.5, 0.5), true);
-    await Promise.race([
-      bot.dig(b, true),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('t')), 8000)),
-    ]);
-    return true;
   } catch {
     try { bot.stopDigging(); } catch {}
+    bot._digLocked = false;
+    bot._digLockPos = null;
     return false;
   }
 }
