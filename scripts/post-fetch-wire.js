@@ -18,6 +18,7 @@ function copy(from, to) {
 copy('scripts/dig-place.js', 'src/agent/dig-place.js');
 copy('scripts/mindcraft-skills.js', 'src/agent/mindcraft-skills.js');
 copy('scripts/mindcraft-core.js', 'src/agent/mindcraft-core.js');
+copy('scripts/pure-survival.js', 'src/agent/pure-survival.js');
 copy('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 copy('scripts/multiplayer-social.js', 'src/agent/multiplayer-social.js');
 copy('scripts/kill-chat.js', 'src/agent/kill-chat.js');
@@ -34,13 +35,11 @@ function aliasToSkills(name, exportMap) {
   const mod = await import('./mindcraft-skills.js');
   if (mod.${real}) return mod.${real}(agent);
   if (mod.startMindcraftSkills) return mod.startMindcraftSkills(agent);
-}\n`
+}
+`
     )
     .join('\n');
-  writeFileSync(
-    dst,
-    `/** Alias → mindcraft-skills */\n${lines}`
-  );
+  writeFileSync(dst, `/** Alias → mindcraft-skills */\n${lines}`);
 }
 
 aliasToSkills('nav-tree.js', { startNavTree: 'startMindcraftUnstuck' });
@@ -57,7 +56,11 @@ function aliasToCore(name, exportName) {
   mkdirSync(dirname(dst), { recursive: true });
   writeFileSync(
     dst,
-    `export async function ${exportName}(agent) {\n  const { startMindcraftCore } = await import('./mindcraft-core.js');\n  return startMindcraftCore(agent);\n}\n`
+    `export async function ${exportName}(agent) {
+  const { startMindcraftCore } = await import('./mindcraft-core.js');
+  return startMindcraftCore(agent);
+}
+`
   );
 }
 aliasToCore('koneko-behaviors.js', 'startKonekoBehaviors');
@@ -76,7 +79,7 @@ if (!agent.includes('LoginGuard') && agent.includes('async openChat')) {
     `async openChat(message) {
         const __m = String(message || '');
         if (!__m.trim()) return;
-        if (/LoginGuard|Disconnected:\s*\[object|não usou o comando|nao usou o comando|auto-prompt|did not use command|Parando a solicita|40 prompts/i.test(__m)) {
+        if (/LoginGuard|Disconnected:\\s*\\[object|não usou o comando|nao usou o comando|auto-prompt|did not use command|Parando a solicita|40 prompts/i.test(__m)) {
             console.warn('[DreamBot] suppressed');
             return;
         }
@@ -94,11 +97,15 @@ agent = agent.replace(
 
 if (!agent.includes('[DreamBot] MINDCRAFT STACK')) {
   const block = `
-            // [DreamBot] MINDCRAFT STACK — real skills, not noops
+            // [DreamBot] MINDCRAFT STACK — pure sequential first
             try {
                 const { startKillChat } = await import('./kill-chat.js');
                 startKillChat(this);
             } catch (e) { console.warn('[DreamBot] killchat', e.message); }
+            try {
+                const { startPureSurvival } = await import('./pure-survival.js');
+                startPureSurvival(this);
+            } catch (e) { console.warn('[DreamBot] pure', e.message); }
             try {
                 const { startMindcraftSkills } = await import('./mindcraft-skills.js');
                 startMindcraftSkills(this);
@@ -133,4 +140,4 @@ if (!agent.includes('[DreamBot] MINDCRAFT STACK')) {
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] MINDCRAFT STACK + hard kill-chat first');
+console.log('[post-wire] PURE survival + mindcraft stack');
