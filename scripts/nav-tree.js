@@ -1,7 +1,8 @@
 /**
- * SUPER NAV TREE + AREA SANITATION (pure code, zero LLM)
- * DIG LOCK: once a block is chosen, bot keeps looking at it until broken.
- * No turn / walk / random while dig is active.
+ * SUPER NAV TREE — pure code
+ * - DIG LOCK: keep looking at block until broken
+ * - DIR COMMIT: pick best direction once and KEEP it (no random spin)
+ * - Only re-pick direction when truly stuck for several ticks
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -70,10 +71,6 @@ async function equipFor(bot, block) {
   }
 }
 
-/**
- * LOCKED dig: keeps looking at the SAME position until air.
- * Refuses to change yaw mid-break. Other systems see bot._digLocked.
- */
 async function digHold(bot, block) {
   if (!block || isAir(block) || isHard(block)) return false;
   const pos = block.position.clone();
@@ -104,7 +101,6 @@ async function digHold(bot, block) {
       }
 
       await equipFor(bot, live);
-
       try {
         await bot.lookAt(center, true);
       } catch {}
@@ -199,6 +195,14 @@ async function placeBridge(bot, dx, dz) {
   }
 }
 
+/** Face a direction (dx,dz) once and keep that yaw */
+async function faceDir(bot, dx, dz) {
+  const yaw = Math.atan2(-dx, -dz);
+  try {
+    await bot.look(yaw, 0, true);
+  } catch {}
+}
+
 export function fullScan(bot, R = 5, HU = 6, HD = 2) {
   if (!bot?.entity) return null;
   const origin = bot.entity.position.floored();
@@ -266,6 +270,52 @@ export function fullScan(bot, R = 5, HU = 6, HD = 2) {
     } else break;
   }
 
+  // score each cardinal for openness / diggability
+  const dirs = [
+    { dx: 1, dz: 0, name: 'east' },
+    { dx: -1, dz: 0, name: 'west' },
+    { dx: 0, dz: 1, name: 'south' },
+    { dx: 0, dz: -1, name: 'north' },
+  ];
+  const dirScores = dirs.map((d) => {
+    let softC = 0,
+      airC = 0,
+      hardC = 0,
+      solidC = 0,
+      depth = 0,
+      openRun = 0;
+    for (let s = 1; s <= 5; s++) {
+      const body = cell(d.dx * s, 0, d.dz * s);
+      const headC = cell(d.dx * s, 1, d.dz * s);
+      const ground = cell(d.dx * s, -1, d.dz * s);
+      if (body.kind === 'hard') {
+        hardC++;
+        break;
+      }
+      if (body.kind === 'air' && headC.kind === 'air') {
+        airC += 2;
+        openRun++;
+        depth = s;
+        // prefer solid ground
+        if (ground.kind === 'soft' || ground.kind === 'solid') airC += 3;
+        continue;
+      }
+      if (body.kind === 'soft') {
+        softC += 2;
+        depth = s;
+      } else if (body.kind === 'solid') {
+        solidC++;
+        depth = s;
+      }
+      if (headC.kind === 'soft') softC++;
+      if (headC.kind === 'air') airC++;
+    }
+    // higher = better path to commit to
+    const score = airC * 20 + softRun * 15 + softC * 8 + depth * 5 - hardC * 40 - solidC * 5;
+    return { ...d, softC, airC, hardC, solidC, depth, openRun, score };
+  });
+
+  // forward relative to current yaw
   const ahead = [];
   for (let s = 1; s <= 5; s++) {
     const body = cell(fdx * s, 0, fdz * s);
@@ -291,33 +341,6 @@ export function fullScan(bot, R = 5, HU = 6, HD = 2) {
     });
   }
 
-  const dirs = [
-    { dx: 1, dz: 0, name: 'east' },
-    { dx: -1, dz: 0, name: 'west' },
-    { dx: 0, dz: 1, name: 'south' },
-    { dx: 0, dz: -1, name: 'north' },
-  ];
-  const dirScores = dirs.map((d) => {
-    let softC = 0,
-      airC = 0,
-      hardC = 0,
-      depth = 0;
-    for (let s = 1; s <= 4; s++) {
-      const body = cell(d.dx * s, 0, d.dz * s);
-      const headC = cell(d.dx * s, 1, d.dz * s);
-      if (body.kind === 'hard') {
-        hardC++;
-        break;
-      }
-      if (body.kind === 'soft') softC++;
-      if (body.kind === 'air') airC++;
-      if (headC.kind === 'soft') softC++;
-      if (headC.kind === 'air') airC++;
-      depth = s;
-    }
-    return { ...d, softC, airC, hardC, depth, score: softC * 12 + airC * 18 + depth * 4 - hardC * 30 };
-  });
-
   return {
     origin,
     fdx,
@@ -341,75 +364,16 @@ export function fullScan(bot, R = 5, HU = 6, HD = 2) {
   };
 }
 
-function enumerateActions(scan, bot) {
-  const acts = [];
-  if (!scan) return acts;
-
-  if (scan.inLava) {
-    acts.push({ type: 'escape_lava', score: 1000 });
-    return acts;
+/** Pick best cardinal direction from scan */
+function pickBestDir(scan, committed) {
+  if (!scan?.dirScores?.length) return committed || { dx: 0, dz: -1 };
+  const sorted = [...scan.dirScores].sort((a, b) => b.score - a.score);
+  // if we have a commit and it's still decent, keep it
+  if (committed) {
+    const same = sorted.find((d) => d.dx === committed.dx && d.dz === committed.dz);
+    if (same && same.score >= sorted[0].score - 25) return same;
   }
-
-  if (scan.inWater) {
-    acts.push({ type: 'swim_up', score: 200 });
-    if (scan.headBlocked && isSoft(scan.cell(0, 1, 0).block))
-      acts.push({ type: 'dig_up', score: 220, y: 1 });
-    acts.push({ type: 'pillar', score: 180 });
-  }
-
-  if (scan.trapped) {
-    acts.push({ type: 'sanitize', score: 300 });
-    acts.push({ type: 'dig_up', score: 250, y: 1 });
-    acts.push({ type: 'dig_up', score: 240, y: 2 });
-    for (const d of scan.dirScores) {
-      acts.push({
-        type: 'dig_dir',
-        score: 200 + d.score,
-        dx: d.dx,
-        dz: d.dz,
-        depth: Math.max(d.depth, 2),
-      });
-    }
-    acts.push({ type: 'stair_out', score: 210 });
-    acts.push({ type: 'pillar', score: 190 });
-  }
-
-  const a0 = scan.ahead[0];
-  const a1 = scan.ahead[1];
-  const a2 = scan.ahead[2];
-
-  if (a0) {
-    if (a0.open) acts.push({ type: 'walk', score: 80 });
-    if (a0.canStep) acts.push({ type: 'jump_step', score: 90, reason: a0.body.name });
-    if (a0.softWall) acts.push({ type: 'dig_front', score: 140, block: a0.body });
-    if (a0.wall && a0.body.kind === 'soft') acts.push({ type: 'dig_front', score: 150, block: a0.body });
-    if (a0.wall && a0.body.kind === 'solid' && scan.trapped)
-      acts.push({ type: 'dig_front', score: 160, block: a0.body });
-    if (a0.gap) {
-      if (a1 && (a1.ground.kind === 'soft' || a1.ground.kind === 'solid') && a1.head.kind === 'air')
-        acts.push({ type: 'jump_gap', score: 100 });
-      else if (hasBuild(bot)) acts.push({ type: 'bridge', score: 110, dx: scan.fdx, dz: scan.fdz });
-      else acts.push({ type: 'jump_gap', score: 70 });
-    }
-  }
-
-  if (a1 && a1.gap && a2 && (a2.ground.kind === 'soft' || a2.ground.kind === 'solid')) {
-    acts.push({ type: 'jump_gap', score: 85 });
-  }
-
-  for (const d of scan.dirScores) {
-    if (d.airC >= 2) acts.push({ type: 'turn_walk', score: 55 + d.airC * 5, dx: d.dx, dz: d.dz });
-    if (d.softC > 0 && d.score > 20)
-      acts.push({ type: 'dig_dir', score: 70 + d.score, dx: d.dx, dz: d.dz, depth: 2 });
-  }
-
-  acts.push({ type: 'walk', score: 30 });
-  acts.push({ type: 'turn_random', score: 8 });
-
-  if (scan.skyOpen && hasBuild(bot)) acts.push({ type: 'pillar', score: 40 });
-
-  acts.sort((a, b) => b.score - a.score);
-  return acts;
+  return sorted[0];
 }
 
 async function executeAction(bot, act, scan) {
@@ -421,22 +385,45 @@ async function executeAction(bot, act, scan) {
   } catch {}
 
   switch (act.type) {
-    case 'walk': {
+    case 'commit_walk': {
+      // face committed dir then walk — NO random yaw
+      await faceDir(bot, act.dx, act.dz);
       bot.setControlState('forward', true);
       bot.setControlState('sprint', true);
-      await sleep(280);
+      await sleep(350);
+      bot.clearControlStates();
+      return true;
+    }
+    case 'commit_dig': {
+      // dig the block directly in front of committed direction
+      await faceDir(bot, act.dx, act.dz);
+      const origin = bot.entity.position.floored();
+      for (const oy of [0, 1]) {
+        const b = bot.blockAt(origin.offset(act.dx, oy, act.dz));
+        if (b && isSolid(b) && !isHard(b)) {
+          console.log('[NAVTREE] commit_dig LOCK', b.name, b.position.x, b.position.y, b.position.z);
+          await digHold(bot, b);
+          return true;
+        }
+      }
+      // nothing to dig — just walk
+      bot.setControlState('forward', true);
+      bot.setControlState('sprint', true);
+      await sleep(250);
       bot.clearControlStates();
       return true;
     }
     case 'jump_step': {
+      await faceDir(bot, act.dx ?? scan.fdx, act.dz ?? scan.fdz);
       bot.setControlState('forward', true);
       bot.setControlState('sprint', true);
       bot.setControlState('jump', true);
-      await sleep(200);
+      await sleep(220);
       bot.clearControlStates();
       return true;
     }
     case 'jump_gap': {
+      await faceDir(bot, act.dx ?? scan.fdx, act.dz ?? scan.fdz);
       bot.setControlState('forward', true);
       bot.setControlState('sprint', true);
       await sleep(80);
@@ -444,16 +431,6 @@ async function executeAction(bot, act, scan) {
       await sleep(280);
       bot.clearControlStates();
       return true;
-    }
-    case 'dig_front': {
-      const b =
-        act.block?.block ||
-        bot.blockAt(bot.entity.position.floored().offset(scan.fdx, 0, scan.fdz));
-      if (b && isSolid(b) && !isHard(b)) {
-        console.log('[NAVTREE] dig_front LOCK', b.name, b.position.x, b.position.y, b.position.z);
-        return digHold(bot, b);
-      }
-      return false;
     }
     case 'dig_up': {
       const y = act.y || 1;
@@ -464,67 +441,45 @@ async function executeAction(bot, act, scan) {
       }
       return false;
     }
-    case 'dig_dir': {
-      const { dx, dz, depth = 2 } = act;
-      console.log('[NAVTREE] dig_dir', dx, dz, 'depth', depth);
-      const origin = bot.entity.position.floored();
-      try {
-        await bot.look(Math.atan2(-dx, -dz), 0, true);
-      } catch {}
-      for (let s = 1; s <= depth; s++) {
-        for (const oy of [0, 1]) {
-          const b = bot.blockAt(origin.offset(dx * s, oy, dz * s));
-          if (b && isSolid(b) && !isHard(b)) {
-            await digHold(bot, b);
-          }
-        }
-        bot.setControlState('forward', true);
-        bot.setControlState('sprint', true);
-        await sleep(200);
-        bot.clearControlStates();
-      }
-      return true;
-    }
     case 'sanitize': {
-      console.log('[NAVTREE] SANITIZE corridor');
+      console.log('[NAVTREE] SANITIZE');
       const pf = bot.entity.position.floored();
+      const dx = act.dx ?? scan.fdx;
+      const dz = act.dz ?? scan.fdz;
+      await faceDir(bot, dx, dz);
+      // ceiling then committed front then sides — one by one locked
       const order = [];
       for (let y = 1; y <= 3; y++) order.push([0, y, 0]);
-      for (const [dx, dz] of [
-        [scan.fdx, scan.fdz],
+      order.push([dx, 0, dz], [dx, 1, dz]);
+      for (const [ox, oz] of [
         [1, 0],
         [-1, 0],
         [0, 1],
         [0, -1],
       ]) {
-        order.push([dx, 0, dz], [dx, 1, dz]);
+        if (ox === dx && oz === dz) continue;
+        order.push([ox, 0, oz], [ox, 1, oz]);
       }
       for (const [ox, oy, oz] of order) {
         const b = bot.blockAt(pf.offset(ox, oy, oz));
-        if (b && isSolid(b) && !isHard(b)) {
-          await digHold(bot, b);
-        }
+        if (b && isSolid(b) && !isHard(b)) await digHold(bot, b);
       }
       bot.setControlState('forward', true);
       bot.setControlState('sprint', true);
       bot.setControlState('jump', true);
-      await sleep(500);
+      await sleep(450);
       bot.clearControlStates();
       return true;
     }
     case 'stair_out': {
-      const best = (scan.dirScores || []).sort((a, b) => b.score - a.score)[0] || {
-        dx: scan.fdx,
-        dz: scan.fdz,
-      };
-      console.log('[NAVTREE] stair_out', best.dx, best.dz);
-      try {
-        await bot.look(Math.atan2(-best.dx, -best.dz), 0, true);
-      } catch {}
+      const dx = act.dx ?? scan.fdx;
+      const dz = act.dz ?? scan.fdz;
+      console.log('[NAVTREE] stair_out', dx, dz);
+      await faceDir(bot, dx, dz);
       const origin = bot.entity.position.floored();
       for (let s = 0; s < 4; s++) {
-        const body = bot.blockAt(origin.offset(best.dx * (s + 1), s, best.dz * (s + 1)));
-        const head = bot.blockAt(origin.offset(best.dx * (s + 1), s + 1, best.dz * (s + 1)));
+        const body = bot.blockAt(origin.offset(dx * (s + 1), s, dz * (s + 1)));
+        const head = bot.blockAt(origin.offset(dx * (s + 1), s + 1, dz * (s + 1)));
         if (body && isSolid(body) && !isHard(body)) await digHold(bot, body);
         if (head && isSolid(head) && !isHard(head)) await digHold(bot, head);
         bot.setControlState('forward', true);
@@ -548,8 +503,11 @@ async function executeAction(bot, act, scan) {
       return true;
     }
     case 'bridge': {
+      const dx = act.dx ?? scan.fdx;
+      const dz = act.dz ?? scan.fdz;
       console.log('[NAVTREE] bridge');
-      await placeBridge(bot, act.dx || scan.fdx, act.dz || scan.fdz);
+      await faceDir(bot, dx, dz);
+      await placeBridge(bot, dx, dz);
       bot.setControlState('forward', true);
       bot.setControlState('sprint', true);
       await sleep(220);
@@ -561,30 +519,6 @@ async function executeAction(bot, act, scan) {
       bot.setControlState('sprint', true);
       bot.setControlState('forward', true);
       await sleep(400);
-      bot.clearControlStates();
-      return true;
-    }
-    case 'turn_walk': {
-      if (bot._digLocked) return false;
-      const yaw = Math.atan2(-act.dx, -act.dz);
-      try {
-        await bot.look(yaw, 0, true);
-      } catch {}
-      bot.setControlState('forward', true);
-      bot.setControlState('sprint', true);
-      await sleep(300);
-      bot.clearControlStates();
-      return true;
-    }
-    case 'turn_random': {
-      if (bot._digLocked) return false;
-      try {
-        bot.entity.yaw += (Math.random() > 0.5 ? 1 : -1) * (Math.PI / 2);
-        await bot.look(bot.entity.yaw, 0, true);
-      } catch {}
-      bot.setControlState('forward', true);
-      bot.setControlState('sprint', true);
-      await sleep(250);
       bot.clearControlStates();
       return true;
     }
@@ -600,6 +534,63 @@ async function executeAction(bot, act, scan) {
   }
 }
 
+/**
+ * Decide next action based on committed direction + scan.
+ * NEVER random-turn. Always dig/walk toward committed dir.
+ */
+function decide(scan, bot, committed) {
+  if (!scan) return null;
+
+  if (scan.inLava) return { type: 'escape_lava', score: 1000 };
+
+  if (scan.inWater) {
+    if (scan.headBlocked) return { type: 'dig_up', score: 220, y: 1 };
+    return { type: 'swim_up', score: 200 };
+  }
+
+  const dir = pickBestDir(scan, committed);
+  const dx = dir.dx;
+  const dz = dir.dz;
+
+  // trapped → sanitize toward best dir
+  if (scan.trapped) {
+    if (scan.headBlocked) return { type: 'dig_up', score: 250, y: 1, dx, dz };
+    return { type: 'sanitize', score: 300, dx, dz };
+  }
+
+  // look at what's in the COMMITTED direction (not current yaw)
+  const body = scan.cell(dx, 0, dz);
+  const head = scan.cell(dx, 1, dz);
+  const ground = scan.cell(dx, -1, dz);
+  const above2 = scan.cell(dx, 2, dz);
+
+  const open = body.kind === 'air' && head.kind === 'air';
+  const softWall = body.kind === 'soft';
+  const solidWall = body.kind === 'solid' || body.kind === 'hard';
+  const canStep =
+    (body.kind === 'soft' || body.kind === 'solid') && head.kind === 'air' && above2.kind === 'air';
+  const gap = ground.kind === 'air' && body.kind === 'air';
+
+  if (softWall || (solidWall && body.kind !== 'hard')) {
+    return { type: 'commit_dig', score: 160, dx, dz };
+  }
+  if (canStep) return { type: 'jump_step', score: 100, dx, dz };
+  if (gap) {
+    if (hasBuild(bot)) return { type: 'bridge', score: 110, dx, dz };
+    return { type: 'jump_gap', score: 90, dx, dz };
+  }
+  if (open) return { type: 'commit_walk', score: 80, dx, dz };
+
+  // still blocked by hard? try dig up / stair / sanitize
+  if (solidWall) {
+    if (scan.headBlocked) return { type: 'dig_up', score: 200, y: 1, dx, dz };
+    return { type: 'stair_out', score: 180, dx, dz };
+  }
+
+  // default: walk committed dir
+  return { type: 'commit_walk', score: 50, dx, dz };
+}
+
 export function startNavTree(agent) {
   const bot = agent?.bot;
   if (!bot || bot._dreamNavTree) return;
@@ -608,13 +599,18 @@ export function startNavTree(agent) {
   let busy = false;
   let lastPos = null;
   let stillTicks = 0;
-  let lastAction = '';
   let lastLog = 0;
+
+  // COMMITTED DIRECTION — persists across ticks
+  let committed = null; // { dx, dz, name }
+  let commitTicks = 0;
+  const COMMIT_HOLD = 8; // keep same dir for ~7s before allowing re-pick
 
   const tick = async () => {
     if (!bot.entity || busy) return;
     if (bot._dreamPvpActive || bot._escapeBusy || bot._killChatEscaping) return;
 
+    // dig lock: only keep looking, no other action
     if (bot._digLocked && bot._digLockPos) {
       try {
         await bot.lookAt(bot._digLockPos.offset(0.5, 0.5, 0.5), true);
@@ -629,58 +625,60 @@ export function startNavTree(agent) {
     busy = true;
     try {
       const pos = bot.entity.position;
-      if (lastPos && pos.distanceTo(lastPos) < 0.2) stillTicks++;
+      if (lastPos && pos.distanceTo(lastPos) < 0.25) stillTicks++;
       else stillTicks = 0;
       lastPos = pos.clone();
 
       const scan = fullScan(bot, 4, 5, 2);
       if (!scan) return;
 
-      if (stillTicks >= 3 || scan.trapped) {
-        const acts = enumerateActions(scan, bot);
-        for (const a of acts) {
-          if (a.type === 'sanitize' || a.type === 'dig_dir' || a.type === 'dig_up' || a.type === 'stair_out' || a.type === 'dig_front')
-            a.score += 100 + stillTicks * 20;
-          if (a.type === 'turn_random' || a.type === 'turn_walk') a.score -= 50;
+      // (re)pick direction only if none OR stuck long enough
+      if (!committed || stillTicks >= 5 || commitTicks >= COMMIT_HOLD) {
+        const best = pickBestDir(scan, stillTicks >= 5 ? null : committed);
+        if (!committed || best.dx !== committed.dx || best.dz !== committed.dz) {
+          committed = { dx: best.dx, dz: best.dz, name: best.name, score: best.score };
+          commitTicks = 0;
+          console.log(
+            '[NAVTREE] COMMIT dir=' +
+              committed.name +
+              ' score=' +
+              Math.round(committed.score) +
+              ' still=' +
+              stillTicks
+          );
+        } else {
+          commitTicks = 0; // refresh hold if same dir re-chosen
         }
-        acts.sort((a, b) => b.score - a.score);
-        const best = acts[0];
-        if (best) {
-          if (Date.now() - lastLog > 3000) {
-            console.log(
-              '[NAVTREE] still=' +
-                stillTicks +
-                ' walls=' +
-                scan.walls +
-                ' → ' +
-                best.type +
-                ' score=' +
-                best.score
-            );
-            lastLog = Date.now();
-          }
-          lastAction = best.type;
-          await executeAction(bot, best, scan);
-          if (/^dig_|sanitize|stair/.test(best.type)) stillTicks = 0;
-        }
-        return;
       }
 
-      const acts = enumerateActions(scan, bot);
-      const best = acts[0];
-      if (!best) return;
+      commitTicks++;
 
-      if (best.type === lastAction && best.type === 'turn_random' && acts[1]) {
-        await executeAction(bot, acts[1], scan);
-        lastAction = acts[1].type;
-      } else {
-        if (Date.now() - lastLog > 5000 && best.score >= 80) {
-          console.log('[NAVTREE]', best.type, 'score=' + best.score, 'walls=' + scan.walls);
-          lastLog = Date.now();
-        }
-        lastAction = best.type;
-        await executeAction(bot, best, scan);
+      let act = decide(scan, bot, committed);
+
+      // force sanitize when very stuck
+      if (stillTicks >= 4 && scan.trapped) {
+        act = { type: 'sanitize', score: 400, dx: committed.dx, dz: committed.dz };
+      } else if (stillTicks >= 6) {
+        // stuck but not trapped — dig toward commit
+        act = { type: 'commit_dig', score: 300, dx: committed.dx, dz: committed.dz };
       }
+
+      if (!act) return;
+
+      if (Date.now() - lastLog > 3500) {
+        console.log(
+          '[NAVTREE]',
+          act.type,
+          'dir=' + (committed?.name || '?'),
+          'still=' + stillTicks,
+          'walls=' + scan.walls
+        );
+        lastLog = Date.now();
+      }
+
+      await executeAction(bot, act, scan);
+
+      if (/dig|sanitize|stair/.test(act.type)) stillTicks = 0;
     } catch (e) {
       console.warn('[NAVTREE]', (e.message || '').slice(0, 50));
     } finally {
@@ -710,9 +708,19 @@ export function startNavTree(agent) {
         bot.setControlState('jump', true);
       }
 
-      if (moving && bot.entity.onGround) {
-        const scan = fullScan(bot, 2, 2, 1);
-        if (scan?.ahead?.[0]?.canStep) {
+      // auto-jump step in committed direction only
+      if (moving && bot.entity.onGround && committed) {
+        const origin = bot.entity.position.floored();
+        const body = bot.blockAt(origin.offset(committed.dx, 0, committed.dz));
+        const head = bot.blockAt(origin.offset(committed.dx, 1, committed.dz));
+        const above2 = bot.blockAt(origin.offset(committed.dx, 2, committed.dz));
+        if (
+          body &&
+          isSolid(body) &&
+          head &&
+          isAir(head) &&
+          (!above2 || isAir(above2))
+        ) {
           bot.setControlState('jump', true);
           setTimeout(() => {
             try {
@@ -725,5 +733,5 @@ export function startNavTree(agent) {
   });
 
   setInterval(tick, 900);
-  console.log('[NAVTREE] ON — dig LOCK + no turn mid-break');
+  console.log('[NAVTREE] ON — commit direction + dig lock (NO random turn)');
 }
