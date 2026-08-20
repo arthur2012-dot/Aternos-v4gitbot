@@ -1,6 +1,6 @@
 /**
- * DIG + PLACE — continuous HOLD dig (not single click), best tool, place/bridge.
- * Patterns from mineflayer-collectblock + mineflayer-tool.
+ * DIG + PLACE — continuous HOLD dig with GLOBAL dig lock.
+ * bot._digLocked prevents ALL other systems from turning the head.
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -17,6 +17,10 @@ async function race(p, ms) {
 
 function isUnbreakable(name) {
   return /bedrock|barrier|command_block|end_portal|end_gateway|structure|reinforced/.test(name || '');
+}
+
+function isAirName(n) {
+  return !n || n === 'air' || n === 'cave_air' || n === 'void_air';
 }
 
 export function bestToolFor(bot, block) {
@@ -53,48 +57,70 @@ export async function equipBestTool(bot, block) {
   return false;
 }
 
-/** Continuous dig until block is gone (HOLD up to 3 attempts). */
+/** Continuous dig until block is gone. Sets global dig lock. */
 export async function digBlock(bot, block, opts = {}) {
   if (!bot?.entity || !block) return false;
   if (isUnbreakable(block.name)) return false;
-  const maxMs = opts.maxMs || 16000;
-  const retries = opts.retries ?? 3;
+  const maxMs = opts.maxMs || 18000;
+  const retries = opts.retries ?? 4;
+  const pos = block.position.clone();
+  const center = pos.offset(0.5, 0.5, 0.5);
+
+  bot._digLocked = true;
+  bot._digLockPos = pos.clone();
+  bot._digLockUntil = Date.now() + maxMs + 3000;
 
   try {
     try { bot.pathfinder?.setGoal?.(null); } catch {}
     try { bot.pathfinder?.stop?.(); } catch {}
-    bot.clearControlStates();
+    try { bot.ashfinder?.stop?.(); } catch {}
+    try { bot.clearControlStates(); } catch {}
 
     await equipBestTool(bot, block);
 
     for (let attempt = 0; attempt < retries; attempt++) {
-      const live = bot.blockAt(block.position);
-      if (!live || live.name === 'air' || live.name === 'cave_air' || live.type === 0) return true;
+      const live = bot.blockAt(pos);
+      if (!live || isAirName(live.name) || live.type === 0) return true;
       if (isUnbreakable(live.name)) return false;
 
-      try { await bot.lookAt(live.position.offset(0.5, 0.5, 0.5), true); } catch {}
+      try { await bot.lookAt(center, true); } catch {}
+
+      const lookIv = setInterval(() => {
+        try {
+          if (!bot.entity) return;
+          bot.lookAt(center, true).catch(() => {});
+        } catch {}
+      }, 180);
 
       try {
-        await race(bot.dig(live), maxMs);
+        await race(bot.dig(live, true), maxMs);
       } catch {
         try { bot.stopDigging(); } catch {}
-        await sleep(120);
-        continue;
+        await sleep(100);
+      } finally {
+        clearInterval(lookIv);
       }
 
-      await sleep(60);
-      const after = bot.blockAt(block.position);
-      if (!after || after.name === 'air' || after.name === 'cave_air' || after.type === 0) return true;
+      try { await bot.lookAt(center, true); } catch {}
+
+      const after = bot.blockAt(pos);
+      if (!after || isAirName(after.name) || after.type === 0) return true;
+      await sleep(80);
     }
     return false;
   } catch {
     try { bot.stopDigging(); } catch {}
     return false;
+  } finally {
+    bot._digLocked = false;
+    bot._digLockPos = null;
+    bot._digLockUntil = 0;
   }
 }
 
 export async function digFrontWall(bot) {
   if (!bot?.entity) return false;
+  if (bot._digLocked) return false;
   const yaw = bot.entity.yaw;
   const fx = Math.round(-Math.sin(yaw));
   const fz = Math.round(-Math.cos(yaw));
@@ -106,7 +132,7 @@ export async function digFrontWall(bot) {
     bot.blockAt(bot.entity.position.offset(fx, 0, fz)),
   ];
   for (const b of targets) {
-    if (b && b.name !== 'air' && b.name !== 'cave_air' && !isUnbreakable(b.name)) {
+    if (b && !isAirName(b.name) && !isUnbreakable(b.name)) {
       if (await digBlock(bot, b)) return true;
     }
   }
@@ -125,6 +151,7 @@ export function scaffoldItem(bot) {
 
 export async function placeAt(bot, against, faceVec) {
   if (!bot?.entity || !against) return false;
+  if (bot._digLocked) return false;
   const item = scaffoldItem(bot);
   if (!item) return false;
   try {
@@ -137,6 +164,7 @@ export async function placeAt(bot, against, faceVec) {
 
 export async function placeUnderFeet(bot) {
   if (!bot?.entity) return false;
+  if (bot._digLocked) return false;
   const item = scaffoldItem(bot);
   if (!item) return false;
   try {
@@ -154,7 +182,7 @@ export async function placeUnderFeet(bot) {
     bot.setControlState('jump', true);
     await sleep(80);
     for (const against of candidates) {
-      if (!against || against.name === 'air' || against.name === 'water' || against.name === 'lava') continue;
+      if (!against || isAirName(against.name) || against.name === 'water' || against.name === 'lava') continue;
       try {
         await bot.lookAt(against.position.offset(0.5, 1, 0.5), true);
         await race(bot.placeBlock(against, new Vec3(0, 1, 0)), 2000);
@@ -172,6 +200,7 @@ export async function placeUnderFeet(bot) {
 
 export async function placeFront(bot) {
   if (!bot?.entity) return false;
+  if (bot._digLocked) return false;
   const item = scaffoldItem(bot);
   if (!item) return false;
   const yaw = bot.entity.yaw;
@@ -182,7 +211,7 @@ export async function placeFront(bot) {
     await bot.equip(item, 'hand');
     bot.setControlState('sneak', true);
     await sleep(50);
-    if (feet && feet.name !== 'air' && feet.name !== 'water') {
+    if (feet && !isAirName(feet.name) && feet.name !== 'water') {
       await bot.lookAt(feet.position.offset(0.5 + fx * 0.5, 1, 0.5 + fz * 0.5), true);
       await race(bot.placeBlock(feet, new Vec3(fx, 0, fz)), 2000);
       bot.clearControlStates();
@@ -197,6 +226,7 @@ export async function placeFront(bot) {
 }
 
 export async function bridgeForward(bot, steps = 3) {
+  if (bot._digLocked) return false;
   let ok = 0;
   for (let i = 0; i < steps; i++) {
     if (await placeFront(bot)) ok++;
@@ -210,9 +240,9 @@ export async function bridgeForward(bot, steps = 3) {
   return ok > 0;
 }
 
-/** collectblock-style: path + dig + pickup */
 export async function collectNearby(bot, names, maxDist = 32) {
   if (!bot?.entity) return false;
+  if (bot._digLocked) return false;
   const set = new Set(Array.isArray(names) ? names : [names]);
   const block = bot.findBlock({
     matching: (b) => b && set.has(b.name),
@@ -240,7 +270,7 @@ export async function collectNearby(bot, names, maxDist = 32) {
   } catch {}
 
   const live = bot.blockAt(block.position);
-  if (live && live.name !== 'air') await digBlock(bot, live);
+  if (live && !isAirName(live.name)) await digBlock(bot, live);
 
   try {
     const drops = Object.values(bot.entities).filter(e =>
