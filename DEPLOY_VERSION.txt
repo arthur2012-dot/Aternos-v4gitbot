@@ -1,2 +1,2 @@
-DREAMBOT_BUILD=2026-08-20-MINDCRAFT-VENDORED-PARTIAL
-FIX=vendoring full mindcraft into repo - core files landing
+DREAMBOT_BUILD=2026-08-20-FORCE-MINDCRAFT-VERIFY
+FIX=fetch-base always clones full mindcraft, overwrites src, verifies agent.js/mindserver.js/skills.js exist, exit 1 if missing

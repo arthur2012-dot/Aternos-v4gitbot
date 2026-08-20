@@ -1,8 +1,8 @@
 {
     "name": "dreambot-mindcraft",
-    "version": "4.1.0-full-mindcraft",
+    "version": "4.2.0-mindcraft-force",
     "type": "module",
-    "description": "DreamBot — full mindcraft base + pure-survival overlays",
+    "description": "DreamBot — force full mindcraft sync every start",
     "engines": {
         "node": ">=22"
     },
@@ -49,8 +49,7 @@
     },
     "scripts": {
         "postinstall": "echo '[postinstall] ok'",
-        "prestart": "FORCE_MINDCRAFT_REFRESH=1 node scripts/fetch-base.js && node scripts/post-fetch-wire.js && node scripts/patch-mindserver.js && node scripts/patch-viewer-proxy.js && node scripts/patch-ui-viewer.js && node scripts/patch-security.js && node scripts/patch-ai-nonblock.js && node scripts/patch-passive-boost.js && node scripts/patch-koneko-water.js && node scripts/fix-agent-syntax.js",
-        "start": "node main.js",
-        "sync-mindcraft": "FORCE_MINDCRAFT_REFRESH=1 node scripts/fetch-base.js"
+        "prestart": "node scripts/fetch-base.js && node scripts/post-fetch-wire.js && node scripts/patch-mindserver.js && node scripts/patch-viewer-proxy.js && node scripts/patch-ui-viewer.js && node scripts/patch-security.js && node scripts/patch-ai-nonblock.js && node scripts/patch-passive-boost.js && node scripts/patch-koneko-water.js && node scripts/fix-agent-syntax.js",
+        "start": "node main.js"
     }
 }

@@ -1,11 +1,7 @@
 /**
- * DreamBot — FULL mindcraft sync
- * Clones https://github.com/mindcraft-bots/mindcraft.git and copies EVERYTHING
- * into the project, then applies DreamBot overlays (settings, pure-survival, stubs, fixes).
- *
- * Env:
- *   FORCE_MINDCRAFT_REFRESH=1  → always re-clone
- *   MC_VERSION                 → default 1.21.11
+ * DreamBot — FULL mindcraft sync (bulletproof)
+ * Always clones mindcraft-bots/mindcraft and OVERWRITES src/ so modules exist.
+ * Preserves only DreamBot-owned files (settings, main, scripts, dream profile).
  */
 import { execSync } from 'child_process';
 import {
@@ -24,9 +20,7 @@ const ROOT = process.cwd();
 const TMP = join(ROOT, '.mindcraft-base');
 const REPO = 'https://github.com/mindcraft-bots/mindcraft.git';
 const VER = process.env.MC_VERSION || '1.21.11';
-const FORCE = process.env.FORCE_MINDCRAFT_REFRESH === '1';
 
-// DreamBot-owned paths that must NEVER be overwritten by upstream
 const PRESERVE = new Set([
   'settings.js',
   'main.js',
@@ -41,10 +35,19 @@ const PRESERVE = new Set([
   'profiles/dream.json',
 ]);
 
-const PRESERVE_PREFIX = [
-  'scripts/',
-  'stubs/',
-  'patches/', // DreamBot patches (agent.js.patch etc.)
+const PRESERVE_PREFIX = ['scripts/', 'stubs/'];
+
+const CRITICAL = [
+  'src/agent/agent.js',
+  'src/agent/modes.js',
+  'src/agent/library/skills.js',
+  'src/agent/library/world.js',
+  'src/mindcraft/mindserver.js',
+  'src/mindcraft/mcserver.js',
+  'src/mindcraft/mindcraft.js',
+  'src/models/prompter.js',
+  'src/utils/mcdata.js',
+  'src/process/agent_process.js',
 ];
 
 function run(cmd) {
@@ -61,14 +64,10 @@ function write(rel, content) {
   writeFileSync(full, content);
 }
 
-function writeStub(rel, content) {
-  write(rel, content);
-  console.log('[fetch-base] stub', rel);
-}
-
 function shouldPreserve(rel) {
   const norm = rel.replace(/\\/g, '/');
   if (PRESERVE.has(norm)) return true;
+  if (norm === 'profiles/dream.json') return true;
   return PRESERVE_PREFIX.some((p) => norm.startsWith(p));
 }
 
@@ -85,86 +84,62 @@ function walkFiles(dir, base = dir, out = []) {
 }
 
 function cloneMindcraft() {
-  const marker = join(TMP, 'src', 'agent', 'agent.js');
-  if (!FORCE && existsSync(marker)) {
-    console.log('[fetch-base] .mindcraft-base present (set FORCE_MINDCRAFT_REFRESH=1 to re-clone)');
-    return;
-  }
   console.log('[fetch-base] cloning FULL mindcraft from', REPO);
   rmSync(TMP, { recursive: true, force: true });
   run('git clone --depth 1 "' + REPO + '" "' + TMP + '"');
+  if (!existsSync(join(TMP, 'src', 'agent', 'agent.js'))) {
+    throw new Error('clone failed: agent.js missing in .mindcraft-base');
+  }
 }
 
-/**
- * Copy entire mindcraft tree into ROOT, skipping DreamBot-owned files.
- */
 function copyEverything() {
-  const parts = [
-    'src',
-    'profiles',
-    'bots',
-    'tasks',
-    'services',
-    'patches', // upstream patch-package patches
-  ];
-
-  // also copy useful root files if missing
-  const rootFiles = [
-    'FAQ.md',
-    'LICENSE',
-    'minecollab.md',
-    'keys.example.json',
-    'eslint.config.js',
-    'docker-compose.yml',
-    'andy.json',
-    'requirements.txt',
-  ];
-
+  const parts = ['src', 'profiles', 'bots', 'tasks', 'services'];
   let copied = 0;
   let skipped = 0;
 
   for (const part of parts) {
     const fromRoot = join(TMP, part);
-    if (!existsSync(fromRoot)) {
-      console.log('[fetch-base] skip missing upstream dir', part);
-      continue;
-    }
-    const files = walkFiles(fromRoot);
-    for (const rel of files) {
+    if (!existsSync(fromRoot)) continue;
+    for (const rel of walkFiles(fromRoot)) {
       const destRel = join(part, rel).replace(/\\/g, '/');
       if (shouldPreserve(destRel)) {
-        skipped++;
-        continue;
-      }
-      // never overwrite profiles/dream.json
-      if (destRel === 'profiles/dream.json') {
         skipped++;
         continue;
       }
       const src = join(fromRoot, rel);
       const dst = join(ROOT, destRel);
       mkdirSync(dirname(dst), { recursive: true });
-      cpSync(src, dst);
+      cpSync(src, dst); // always overwrite
       copied++;
     }
-    console.log('[fetch-base] synced dir', part);
+    console.log('[fetch-base] synced', part);
   }
 
-  for (const f of rootFiles) {
-    const src = join(TMP, f);
-    if (!existsSync(src)) continue;
-    if (shouldPreserve(f)) continue;
-    const dst = join(ROOT, f);
-    // only copy if not present, or always refresh non-preserve
-    cpSync(src, dst);
-    copied++;
+  // upstream patches (patch-package)
+  const upPatches = join(TMP, 'patches');
+  if (existsSync(upPatches)) {
+    for (const rel of walkFiles(upPatches)) {
+      // only copy upstream-named patches (contain +)
+      if (!rel.includes('+')) continue;
+      const destRel = join('patches', rel).replace(/\\/g, '/');
+      mkdirSync(dirname(join(ROOT, destRel)), { recursive: true });
+      cpSync(join(upPatches, rel), join(ROOT, destRel));
+      copied++;
+    }
   }
 
   console.log('[fetch-base] copied', copied, 'files, preserved', skipped);
 }
 
+function verifyCritical() {
+  const missing = CRITICAL.filter((p) => !existsSync(join(ROOT, p)));
+  if (missing.length) {
+    throw new Error('CRITICAL modules missing after sync: ' + missing.join(', '));
+  }
+  console.log('[fetch-base] critical modules OK');
+}
+
 function applyDreamBotFixes() {
-  // prompter safeReplace
   try {
     let prompter = read('src/models/prompter.js');
     if (!prompter.includes('[DreamBot] safeReplace') && prompter.includes('async replaceStrings')) {
@@ -183,13 +158,11 @@ function applyDreamBotFixes() {
       prompter = prompter.replace(/async replaceStrings\s*\(/, safeMethod);
       prompter = prompter.replace(/prompt\s*=\s*prompt\.replaceAll\(/g, 'prompt = this._safeReplaceAll(prompt, ');
       write('src/models/prompter.js', prompter);
-      console.log('[fetch-base] prompter safeReplace');
     }
   } catch (e) {
     console.warn('[fetch-base] prompter', e.message);
   }
 
-  // modes: keep self-prompt, longer stuck, no cleanKill
   try {
     let modes = read('src/agent/modes.js');
     modes = modes.replace(
@@ -202,12 +175,10 @@ function applyDreamBotFixes() {
       "console.warn('[DreamBot] stuck — stay online')"
     );
     write('src/agent/modes.js', modes);
-    console.log('[fetch-base] modes fixes');
   } catch (e) {
     console.warn('[fetch-base] modes', e.message);
   }
 
-  // skills: softer PathStopped
   try {
     let skills = read('src/agent/library/skills.js');
     if (!skills.includes('[DreamBot] collect continue')) {
@@ -218,11 +189,9 @@ function applyDreamBotFixes() {
           '            } else console.log(err);'
       );
       write('src/agent/library/skills.js', skills);
-      console.log('[fetch-base] skills PathStopped soft');
     }
   } catch {}
 
-  // agent chat suppress + no hello world exit spam
   try {
     let agent = read('src/agent/agent.js');
     if (agent.includes('Hello world! I am')) {
@@ -249,22 +218,18 @@ function applyDreamBotFixes() {
       '/* no Exiting chat */'
     );
     write('src/agent/agent.js', agent);
-    console.log('[fetch-base] agent chat fixes');
   } catch (e) {
     console.warn('[fetch-base] agent', e.message);
   }
 
-  // self_prompter softer
   try {
     let sp = read('src/agent/self_prompter.js');
     sp = sp.replace(/await this\.agent\.actions\.stop\(\);/g, '/* no stop */ void 0;');
     sp = sp.replace(/MAX_NO_COMMAND = \d+/, 'MAX_NO_COMMAND = 40');
     sp = sp.replace(/this\.state = STOPPED;/g, 'this.state = PAUSED;');
     write('src/agent/self_prompter.js', sp);
-    console.log('[fetch-base] self_prompter soft');
   } catch {}
 
-  // mcdata: never delete version
   try {
     let mc = read('src/utils/mcdata.js');
     if (!mc.includes('DreamBot: NEVER delete version')) {
@@ -275,19 +240,14 @@ function applyDreamBotFixes() {
           "';\n    console.log('[DreamBot] version', options.version);"
       );
       write('src/utils/mcdata.js', mc);
-      console.log('[fetch-base] mcdata version lock');
     }
   } catch {}
 }
 
 function installOverlays() {
-  // settings bridge
-  write(
-    'src/settings.js',
-    "import settings from '../settings.js';\nexport default settings;\n"
-  );
+  write('src/settings.js', "import settings from '../settings.js';\nexport default settings;\n");
 
-  writeStub(
+  write(
     'src/agent/settings.js',
     'let settings = {};\n' +
       'export default settings;\n' +
@@ -303,30 +263,16 @@ function installOverlays() {
       '}\n'
   );
 
-  // optional stubs if present
+  // ONLY apply stubs if upstream file is still missing (never overwrite real mindcraft)
   const stubs = [
     ['stubs/math.js', 'src/utils/math.js'],
     ['stubs/examples.js', 'src/utils/examples.js'],
-    ['stubs/agent_process.js', 'src/process/agent_process.js'],
-    ['stubs/coder.js', 'src/agent/coder.js'],
   ];
   for (const [from, to] of stubs) {
-    if (existsSync(join(ROOT, from))) {
+    if (existsSync(join(ROOT, from)) && !existsSync(join(ROOT, to))) {
       write(to, readFileSync(join(ROOT, from), 'utf8'));
-      console.log('[fetch-base] overlay', to);
+      console.log('[fetch-base] stub fill', to);
     }
-  }
-
-  // light vision if script exists
-  const lightPath = join(ROOT, 'scripts', 'light-vision.js');
-  if (existsSync(lightPath)) {
-    writeStub(
-      'src/agent/vision/browser_viewer.js',
-      '// Light vision stub\n' +
-        'export function addBrowserViewer() {}\n' +
-        'export function addViewer() {}\n' +
-        'export default { addBrowserViewer, addViewer };\n'
-    );
   }
 }
 
@@ -334,10 +280,12 @@ try {
   console.log('[fetch-base] FULL mindcraft sync starting...');
   cloneMindcraft();
   copyEverything();
+  verifyCritical();
   applyDreamBotFixes();
   installOverlays();
+  verifyCritical();
   console.log('[fetch-base] Ready — full mindcraft + DreamBot overlays');
 } catch (e) {
-  console.error('[fetch-base]', e.message);
-  process.exit(0);
+  console.error('[fetch-base] FATAL', e.message);
+  process.exit(1);
 }
