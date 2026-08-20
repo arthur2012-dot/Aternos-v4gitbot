@@ -1,7 +1,5 @@
 /**
- * pure-survival.js — stack completa, 1 ação por vez
- * Plugins via plugin-stack + ensure local
- * Prioridade: sobreviver > combate > abrigo noite > craft > coletar > explorar
+ * pure-survival — 1 ação; liga dig-place + house-builder que já existiam
  */
 
 import pathfinderPkg from 'mineflayer-pathfinder';
@@ -40,16 +38,6 @@ function findItem(bot, re) {
 }
 
 function ensurePlugins(bot) {
-  // prefer full stack loader
-  try {
-    const { loadAllPlugins } = require('./plugin-stack.js');
-    if (typeof loadAllPlugins === 'function') loadAllPlugins(bot);
-  } catch {
-    try {
-      // dynamic import not sync — fallback inline
-    } catch {}
-  }
-
   try {
     if (!bot.pathfinder) bot.loadPlugin(pathfinder);
     const mv = new Movements(bot);
@@ -60,46 +48,31 @@ function ensurePlugins(bot) {
   } catch (e) {
     console.warn('[PURE] pathfinder', e.message);
   }
-
   try {
     if (!bot.ashfinder) {
       const baritone = require('@miner-org/mineflayer-baritone');
       const loader = baritone.loader || baritone.default?.loader || baritone;
-      if (typeof loader === 'function') {
-        bot.loadPlugin(loader);
-        console.log('[PURE] ashfinder ON');
-      }
+      if (typeof loader === 'function') bot.loadPlugin(loader);
     }
     if (bot.ashfinder?.config) {
       bot.ashfinder.config.parkour = true;
       bot.ashfinder.config.swimming = true;
     }
-  } catch (e) {
-    console.warn('[PURE] baritone skip', String(e.message || e).slice(0, 50));
-  }
-
+  } catch {}
   try {
     const plug = collectBlockPlugin.plugin || collectBlockPlugin;
     if (!bot.collectBlock) bot.loadPlugin(plug);
-  } catch (e) {
-    console.warn('[PURE] collectblock', e.message);
-  }
-
+  } catch {}
   try {
     const plug = pvpPlugin.plugin || pvpPlugin;
     if (!bot.pvp) bot.loadPlugin(plug);
-  } catch (e) {
-    console.warn('[PURE] pvp', e.message);
-  }
-
+  } catch {}
   try {
     if (!bot.tool) {
       const tool = require('mineflayer-tool').plugin || require('mineflayer-tool');
       bot.loadPlugin(tool);
     }
-  } catch (e) {
-    console.warn('[PURE] tool', e.message);
-  }
+  } catch {}
 }
 
 function isPlayable(bot) {
@@ -110,10 +83,16 @@ function isPlayable(bot) {
   return true;
 }
 
-function isNight(bot) {
+function isTight(bot) {
   try {
-    const t = bot.time?.timeOfDay ?? bot.time?.age ?? 0;
-    return t > 13000 && t < 23000;
+    const p = bot.entity.position.floored();
+    let walls = 0;
+    for (const o of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const b = bot.blockAt(p.offset(o[0], 0, o[1]));
+      if (b && b.boundingBox === 'block') walls++;
+    }
+    const head = bot.blockAt(p.offset(0, 1, 0));
+    return walls >= 2 || (head && head.boundingBox === 'block');
   } catch {
     return false;
   }
@@ -128,14 +107,8 @@ async function gotoNear(bot, x, y, z, range = 2) {
         await bot.ashfinder.goto(new G.GoalNear(new Vec3(x, y, z), range));
         return true;
       }
-      if (G.GoalExact) {
-        await bot.ashfinder.goto(new G.GoalExact(new Vec3(Math.floor(x), Math.floor(y), Math.floor(z))));
-        return true;
-      }
     }
-  } catch (e) {
-    console.warn('[PURE] ashfinder', String(e.message || e).slice(0, 40));
-  }
+  } catch {}
   try {
     await bot.pathfinder.goto(new pfGoals.GoalNear(x, y, z, range));
     return true;
@@ -159,9 +132,8 @@ async function doEat(bot) {
   if (!food) return false;
   try {
     await bot.equip(food, 'hand');
-    if (typeof bot.consume === 'function') {
-      await bot.consume();
-    } else {
+    if (typeof bot.consume === 'function') await bot.consume();
+    else {
       bot.activateItem();
       await sleep(1600);
       try { bot.deactivateItem(); } catch {}
@@ -210,20 +182,55 @@ async function doCollect(bot, block) {
   }
 }
 
+/** BUG FIX progresso: crafting_table no inventário precisa estar no chão */
+async function placeCraftingTable(bot) {
+  const tableItem = findItem(bot, /^crafting_table$/);
+  if (!tableItem) return false;
+  const already = bot.findBlock({
+    matching: (b) => b?.name === 'crafting_table',
+    maxDistance: 12,
+  });
+  if (already) return false;
+
+  try {
+    await bot.equip(tableItem, 'hand');
+    const feet = bot.entity.position.floored();
+    const ref = bot.blockAt(feet.offset(1, -1, 0)) || bot.blockAt(feet.offset(0, -1, 0));
+    if (!ref || ref.boundingBox !== 'block') return false;
+    await bot.lookAt(ref.position.offset(0.5, 1.1, 0.5), true);
+    await bot.placeBlock(ref, new Vec3(0, 1, 0));
+    console.log('[PURE] placed crafting_table');
+    await sleep(300);
+    return true;
+  } catch (e) {
+    console.warn('[PURE] place table', String(e.message || e).slice(0, 40));
+    return false;
+  }
+}
+
 async function tryCraft(bot, itemName, qty = 1) {
   try {
     const mcData = require('minecraft-data')(bot.version);
     const item = mcData.itemsByName[itemName];
     if (!item) return false;
-    const tableBlock = bot.findBlock({
+    let tableBlock = bot.findBlock({
       matching: mcData.blocksByName.crafting_table?.id,
       maxDistance: 16,
     });
+    // se tem mesa no inv e não no mundo → coloca
+    if (!tableBlock && findItem(bot, /^crafting_table$/)) {
+      await placeCraftingTable(bot);
+      tableBlock = bot.findBlock({
+        matching: mcData.blocksByName.crafting_table?.id,
+        maxDistance: 16,
+      });
+    }
     let recipes = bot.recipesFor(item.id, null, 1, tableBlock || null);
     if (!recipes?.length) recipes = bot.recipesFor(item.id, null, 1, true);
     if (!recipes?.length) return false;
     await bot.craft(recipes[0], qty, tableBlock || null);
     console.log('[PURE] craft', itemName, 'x' + qty);
+    if (itemName === 'crafting_table') await placeCraftingTable(bot);
     return true;
   } catch {
     return false;
@@ -251,6 +258,10 @@ async function doCraftProgress(bot) {
   }
   if (planks >= 4 && !hasTable) {
     if (await tryCraft(bot, 'crafting_table', 1)) return true;
+  }
+  // mesa no inventário mas não no mundo
+  if (findItem(bot, /^crafting_table$/) && !bot.findBlock({ matching: (b) => b?.name === 'crafting_table', maxDistance: 12 })) {
+    if (await placeCraftingTable(bot)) return true;
   }
   if (planks >= 3 && sticks >= 2 && !hasWoodPick) {
     if (await tryCraft(bot, 'wooden_pickaxe', 1)) return true;
@@ -320,7 +331,6 @@ export function startPureSurvival(agent) {
 
   let busy = false;
   let lastDecision = 0;
-  let lastShelter = 0;
   const DECISION_MS = 700;
 
   async function runOnce() {
@@ -331,6 +341,18 @@ export function startPureSurvival(agent) {
     busy = true;
     bot._dreamBusy = true;
     try {
+      // 0) ESCAPE — código real dig-place (já existia, agora chamado)
+      if (isTight(bot) || bot.entity.position.y < 58) {
+        try {
+          const { escapeTight } = await import('./dig-place.js');
+          if (await escapeTight(bot)) return;
+        } catch {}
+        if (bot.mc?.escapeCave) {
+          await bot.mc.escapeCave();
+          return;
+        }
+      }
+
       if (bot.food < 14 || bot.health < 12) {
         if (await doEat(bot)) return;
       }
@@ -351,16 +373,13 @@ export function startPureSurvival(agent) {
         try { await bot.pvp.stop(); } catch {}
       }
 
-      // abrigo à noite (no máximo 1x a cada 3 min)
-      if (isNight(bot) && Date.now() - lastShelter > 180000) {
-        if (typeof bot.dreamBuildShelter === 'function') {
-          const ok = await bot.dreamBuildShelter();
-          lastShelter = Date.now();
-          if (ok) return;
-        }
-      }
-
       if (await doCraftProgress(bot)) return;
+
+      // house-builder real (estava morto)
+      try {
+        const { maybeBuildHouse } = await import('./house-builder.js');
+        if (await maybeBuildHouse(bot)) return;
+      } catch {}
 
       const target = pickCollectTarget(bot);
       if (target?.block) {
@@ -418,6 +437,9 @@ export function startPureSurvival(agent) {
         busy = true;
         bot._dreamBusy = true;
         try {
+          const { maybeBuildHouse } = await import('./house-builder.js');
+          await maybeBuildHouse(bot);
+        } catch {
           if (bot.dreamBuildShelter) await bot.dreamBuildShelter();
         } finally {
           busy = false;
@@ -427,5 +449,5 @@ export function startPureSurvival(agent) {
     }
   });
 
-  console.log('[PURE] FULL stack — baritone + collect + pvp + tool + craft + shelter | 1 ação');
+  console.log('[PURE] wired dig-place + house-builder + place table | 1 ação');
 }
