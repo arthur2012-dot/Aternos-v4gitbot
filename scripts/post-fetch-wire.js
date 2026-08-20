@@ -19,6 +19,8 @@ copy('scripts/dig-place.js', 'src/agent/dig-place.js');
 copy('scripts/mindcraft-skills.js', 'src/agent/mindcraft-skills.js');
 copy('scripts/mindcraft-core.js', 'src/agent/mindcraft-core.js');
 copy('scripts/pure-survival.js', 'src/agent/pure-survival.js');
+copy('scripts/plugin-stack.js', 'src/agent/plugin-stack.js');
+copy('scripts/simple-shelter.js', 'src/agent/simple-shelter.js');
 copy('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
 copy('scripts/multiplayer-social.js', 'src/agent/multiplayer-social.js');
 copy('scripts/kill-chat.js', 'src/agent/kill-chat.js');
@@ -97,11 +99,19 @@ agent = agent.replace(
 
 if (!agent.includes('[DreamBot] MINDCRAFT STACK')) {
   const block = `
-            // [DreamBot] MINDCRAFT STACK — pure sequential first
+            // [DreamBot] MINDCRAFT STACK — plugins first, then pure sequential
             try {
                 const { startKillChat } = await import('./kill-chat.js');
                 startKillChat(this);
             } catch (e) { console.warn('[DreamBot] killchat', e.message); }
+            try {
+                const { startPluginStack } = await import('./plugin-stack.js');
+                startPluginStack(this);
+            } catch (e) { console.warn('[DreamBot] stack', e.message); }
+            try {
+                const { startSimpleShelter } = await import('./simple-shelter.js');
+                startSimpleShelter(this);
+            } catch (e) { console.warn('[DreamBot] shelter', e.message); }
             try {
                 const { startPureSurvival } = await import('./pure-survival.js');
                 startPureSurvival(this);
@@ -140,4 +150,4 @@ if (!agent.includes('[DreamBot] MINDCRAFT STACK')) {
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] PURE survival + mindcraft stack');
+console.log('[post-wire] FULL STACK: plugins + pure + mindcraft');
