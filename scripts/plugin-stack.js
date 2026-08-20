@@ -1,8 +1,6 @@
 /**
- * plugin-stack.js — carrega TODOS os plugins uma vez (sem lógica de task)
- * pathfinder, baritone, collectblock, pvp, tool, auto-eat, armor, builder
+ * Carrega plugins 1x + Movements otimizados
  */
-
 import pathfinderPkg from 'mineflayer-pathfinder';
 const { pathfinder, Movements } = pathfinderPkg;
 import collectBlockPlugin from 'mineflayer-collectblock';
@@ -14,20 +12,35 @@ export function loadAllPlugins(bot) {
   if (!bot || bot._pluginsLoaded) return;
   bot._pluginsLoaded = true;
 
-  // pathfinder (obrigatório para collect/builder)
   try {
     if (!bot.pathfinder) bot.loadPlugin(pathfinder);
-    const mv = new Movements(bot);
-    mv.canDig = true;
-    mv.allowSprinting = true;
-    mv.allowParkour = true;
-    bot.pathfinder.setMovements(mv);
     console.log('[STACK] pathfinder');
   } catch (e) {
     console.warn('[STACK] pathfinder', e.message);
   }
 
-  // mineflayer-baritone → bot.ashfinder
+  // Movements bons (docs pathfinder)
+  try {
+    const { setupDreamBotMovements } = require('./setup-movements.js');
+    if (typeof setupDreamBotMovements === 'function') setupDreamBotMovements(bot);
+    else throw new Error('no setup');
+  } catch {
+    try {
+      const mcData = require('minecraft-data')(bot.version);
+      const mv = new Movements(bot, mcData);
+      mv.canDig = true;
+      mv.digCost = 1.4;
+      mv.liquidCost = 8;
+      mv.allowSprinting = true;
+      mv.allowParkour = true;
+      mv.maxDropDown = 3;
+      bot.pathfinder.setMovements(mv);
+      console.log('[STACK] movements fallback');
+    } catch (e) {
+      console.warn('[STACK] movements', e.message);
+    }
+  }
+
   try {
     if (!bot.ashfinder) {
       const baritone = require('@miner-org/mineflayer-baritone');
@@ -37,13 +50,14 @@ export function loadAllPlugins(bot) {
     if (bot.ashfinder?.config) {
       bot.ashfinder.config.parkour = true;
       bot.ashfinder.config.swimming = true;
+      bot.ashfinder.config.breakBlocks = true;
+      bot.ashfinder.config.placeBlocks = true;
     }
-    if (bot.ashfinder) console.log('[STACK] ashfinder/baritone');
+    if (bot.ashfinder) console.log('[STACK] ashfinder');
   } catch (e) {
     console.warn('[STACK] baritone', String(e.message || e).slice(0, 50));
   }
 
-  // collectblock
   try {
     const plug = collectBlockPlugin.plugin || collectBlockPlugin;
     if (!bot.collectBlock) bot.loadPlugin(plug);
@@ -52,7 +66,6 @@ export function loadAllPlugins(bot) {
     console.warn('[STACK] collectblock', e.message);
   }
 
-  // pvp
   try {
     const plug = pvpPlugin.plugin || pvpPlugin;
     if (!bot.pvp) bot.loadPlugin(plug);
@@ -61,7 +74,6 @@ export function loadAllPlugins(bot) {
     console.warn('[STACK] pvp', e.message);
   }
 
-  // tool
   try {
     if (!bot.tool) {
       const tool = require('mineflayer-tool').plugin || require('mineflayer-tool');
@@ -72,17 +84,18 @@ export function loadAllPlugins(bot) {
     console.warn('[STACK] tool', e.message);
   }
 
-  // auto-eat
   try {
     if (!bot.autoEat) {
-      const autoEat = require('mineflayer-auto-eat').loader || require('mineflayer-auto-eat').plugin || require('mineflayer-auto-eat');
+      const autoEat =
+        require('mineflayer-auto-eat').loader ||
+        require('mineflayer-auto-eat').plugin ||
+        require('mineflayer-auto-eat');
       if (typeof autoEat === 'function') bot.loadPlugin(autoEat);
     }
     if (bot.autoEat) {
       bot.autoEat.options = bot.autoEat.options || {};
       bot.autoEat.options.priority = 'foodPoints';
       bot.autoEat.options.startAt = 14;
-      bot.autoEat.options.bannedFood = [];
       if (typeof bot.autoEat.enable === 'function') bot.autoEat.enable();
       console.log('[STACK] auto-eat');
     }
@@ -90,17 +103,15 @@ export function loadAllPlugins(bot) {
     console.warn('[STACK] auto-eat', String(e.message || e).slice(0, 50));
   }
 
-  // armor-manager
   try {
     const armor = require('mineflayer-armor-manager');
     const plug = armor.default || armor;
     if (typeof plug === 'function') bot.loadPlugin(plug);
-    console.log('[STACK] armor-manager');
+    console.log('[STACK] armor');
   } catch (e) {
     console.warn('[STACK] armor', e.message);
   }
 
-  // builder (precisa pathfinder já carregado)
   try {
     if (!bot.builder) {
       const { builder } = require('mineflayer-builder');
@@ -111,7 +122,7 @@ export function loadAllPlugins(bot) {
     console.warn('[STACK] builder', String(e.message || e).slice(0, 50));
   }
 
-  console.log('[STACK] all plugins load attempted');
+  console.log('[STACK] load complete');
 }
 
 export function startPluginStack(agent) {
