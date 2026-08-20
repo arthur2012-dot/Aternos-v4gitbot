@@ -1,5 +1,5 @@
 /**
- * DreamBot — Mindcraft base + fixes + LIGHT vision (no prismarine-viewer lag)
+ * DreamBot — Mindcraft base + fixes + LIGHT vision
  */
 import { execSync } from 'child_process';
 import { existsSync, cpSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
@@ -34,12 +34,12 @@ function ensureTree() {
   }
   console.log('[fetch-base] clone mindcraft...');
   rmSync(TMP, { recursive: true, force: true });
-  run(`git clone --depth 1 https://github.com/mindcraft-bots/mindcraft.git "${TMP}"`);
+  run('git clone --depth 1 https://github.com/mindcraft-bots/mindcraft.git "' + TMP + '"');
   for (const part of ['src', 'profiles', 'bots']) {
     const from = join(TMP, part);
     if (!existsSync(from)) continue;
     mkdirSync(join(ROOT, part), { recursive: true });
-    try { run(`cp -rn "${from}/." "${join(ROOT, part)}/" 2>/dev/null || true`); } catch {}
+    try { run('cp -rn "' + from + '/." "' + join(ROOT, part) + '/" 2>/dev/null || true'); } catch {}
   }
   if (!existsSync(join(ROOT, 'main.js'))) cpSync(join(TMP, 'main.js'), join(ROOT, 'main.js'));
 }
@@ -47,7 +47,7 @@ function ensureTree() {
 function refresh() {
   if (!existsSync(join(TMP, 'src', 'agent', 'agent.js'))) {
     rmSync(TMP, { recursive: true, force: true });
-    run(`git clone --depth 1 https://github.com/mindcraft-bots/mindcraft.git "${TMP}"`);
+    run('git clone --depth 1 https://github.com/mindcraft-bots/mindcraft.git "' + TMP + '"');
   }
   for (const rel of [
     'src/agent/agent.js',
@@ -69,19 +69,20 @@ function applyFixes() {
   try {
     let prompter = read('src/models/prompter.js');
     if (!prompter.includes('[DreamBot] safeReplace') && prompter.includes('async replaceStrings')) {
-      prompter = prompter.replace(
-        /async replaceStrings\s*\(/,
-        `// [DreamBot] safeReplace
-    _safeReplaceAll(str, search, repl) {
-        const s = (str == null) ? '' : String(str);
-        if (typeof s.replaceAll === 'function') {
-            try { return s.replaceAll(search, repl); } catch {}
-        }
-        const esc = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        return s.replace(new RegExp(esc, 'g'), repl == null ? '' : String(repl));
-    }
-    async replaceStrings(`
-      );
+      // safeReplace method as plain string (no template literal with dollar-brace)
+      const safeMethod = [
+        '// [DreamBot] safeReplace',
+        '    _safeReplaceAll(str, search, repl) {',
+        "        const s = (str == null) ? '' : String(str);",
+        '        if (typeof s.replaceAll === \'function\') {',
+        '            try { return s.replaceAll(search, repl); } catch {}',
+        '        }',
+        '        const esc = String(search).replace(/[.*+?^${}()|[\\]\\\\]/g, \'\\\\$&\');',
+        "        return s.replace(new RegExp(esc, 'g'), repl == null ? '' : String(repl));",
+        '    }',
+        '    async replaceStrings(',
+      ].join('\n');
+      prompter = prompter.replace(/async replaceStrings\s*\(/, safeMethod);
       prompter = prompter.replace(/prompt\s*=\s*prompt\.replaceAll\(/g, 'prompt = this._safeReplaceAll(prompt, ');
       write('src/models/prompter.js', prompter);
     }
@@ -95,7 +96,7 @@ function applyFixes() {
   modes = modes.replace(/max_stuck_time:\s*20/g, 'max_stuck_time: 90');
   modes = modes.replace(
     /agent\.cleanKill\(["']Got stuck[^"']*["']\)/g,
-    `console.warn('[DreamBot] stuck — stay online')`
+    "console.warn('[DreamBot] stuck — stay online')"
   );
   write('src/agent/modes.js', modes);
 
@@ -103,9 +104,9 @@ function applyFixes() {
   if (!skills.includes('[DreamBot] collect soft')) {
     skills = skills.replace(
       /console\.log\(err\);\s*\/\/ log pathfinder errors for debugging/g,
-      `if (/PathStopped|NoPath|Timeout|GoalChanged/i.test(String(err?.message || err))) {
-                console.warn('[DreamBot] collect continue');
-            } else console.log(err);`
+      "if (/PathStopped|NoPath|Timeout|GoalChanged/i.test(String(err?.message || err))) {\n" +
+      "                console.warn('[DreamBot] collect continue');\n" +
+      '            } else console.log(err);'
     );
   }
   write('src/agent/library/skills.js', skills);
@@ -114,28 +115,25 @@ function applyFixes() {
   if (agent.includes('Hello world! I am')) {
     agent = agent.replace(
       /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/,
-      `try {
-            if (this.self_prompter && !this.self_prompter.isActive()) {
-                this.self_prompter.start('Survive. Always !command. Keep moving.');
-            }
-        } catch {}`
+      "try {\n            if (this.self_prompter && !this.self_prompter.isActive()) {\n" +
+      "                this.self_prompter.start('Survive. Always !command. Keep moving.');\n" +
+      '            }\n        } catch {}'
     );
   }
   if (!agent.includes('[DreamBot] suppressed chat')) {
     agent = agent.replace(
       /async openChat\(message\) \{/,
-      `async openChat(message) {
-        const __m = String(message || '');
-        if (!__m.trim()) return;
-        if (/groq|rate.?limit|brain disconnected|api key|restarting|exiting|hello world|PathStopped|passivo|cooldown|replaceAll|key not found/i.test(__m)) {
-            console.warn('[DreamBot] suppressed:', __m.slice(0, 40));
-            return;
-        }`
+      'async openChat(message) {\n' +
+      "        const __m = String(message || '');\n" +
+      '        if (!__m.trim()) return;\n' +
+      "        if (/groq|rate.?limit|brain disconnected|api key|restarting|exiting|hello world|PathStopped|passivo|cooldown|replaceAll|key not found/i.test(__m)) {\n" +
+      "            console.warn('[DreamBot] suppressed:', __m.slice(0, 40));\n" +
+      '            return;\n        }'
     );
   }
   agent = agent.replace(
     /this\.bot\.chat\(code > 1 \? 'Restarting\.': 'Exiting\.'\);/g,
-    `/* no Exiting chat */`
+    '/* no Exiting chat */'
   );
   write('src/agent/agent.js', agent);
 
@@ -151,9 +149,7 @@ function applyFixes() {
   if (!mc.includes('DreamBot: NEVER delete version')) {
     mc = mc.replace(
       /if\s*\(\s*!mc_version\s*\|\|\s*mc_version\s*===\s*["']auto["']\s*\)\s*\{[\s\S]*?delete\s+options\.version;[\s\S]*?\}/m,
-      `// DreamBot: NEVER delete version
-    options.version = options.version || '${VER}';
-    console.log('[DreamBot] version', options.version);`
+      "// DreamBot: NEVER delete version\n    options.version = options.version || '" + VER + "';\n    console.log('[DreamBot] version', options.version);"
     );
     write('src/utils/mcdata.js', mc);
   }
@@ -162,64 +158,38 @@ function applyFixes() {
   console.log('[fetch-base] coder stub + fixes');
 }
 
-/** Install light vision (text scene) — same API as Mindcraft, no WebGL */
 function installLightVision() {
   const lightPath = join(ROOT, 'scripts', 'light-vision.js');
   let light = '';
   if (existsSync(lightPath)) light = readFileSync(lightPath, 'utf8');
 
-  writeStub('src/agent/vision/browser_viewer.js', `// Light vision: no prismarine-viewer (avoids Railway crash/lag)
-export function addBrowserViewer() {
-  if (process.env.ENABLE_VIEWER === '1') {
-    console.warn('[VISION] ENABLE_VIEWER ignored in light mode (no prismarine-viewer)');
-  }
-}
-export function addViewer() {}
-export default { addBrowserViewer, addViewer };
-`);
+  writeStub('src/agent/vision/browser_viewer.js',
+    '// Light vision: no prismarine-viewer\n' +
+    'export function addBrowserViewer() {\n' +
+    "  if (process.env.ENABLE_VIEWER === '1') {\n" +
+    "    console.warn('[VISION] ENABLE_VIEWER ignored');\n" +
+    '  }\n}\nexport function addViewer() {}\nexport default { addBrowserViewer, addViewer };\n'
+  );
 
-  writeStub('src/agent/vision/camera.js', `import { EventEmitter } from 'events';
-export class Camera extends EventEmitter {
-  constructor(bot, fp) {
-    super();
-    this.bot = bot;
-    this.fp = fp;
-    this.disabled = false;
-    this.mode = 'light-text';
-    setImmediate(() => this.emit('ready'));
-  }
-  async capture() { return null; }
-}
-`);
+  writeStub('src/agent/vision/camera.js',
+    "import { EventEmitter } from 'events';\n" +
+    'export class Camera extends EventEmitter {\n' +
+    '  constructor(bot, fp) { super(); this.bot = bot; this.fp = fp; this.disabled = false; this.mode = \'light-text\'; setImmediate(() => this.emit(\'ready\')); }\n' +
+    '  async capture() { return null; }\n}\n'
+  );
 
-  // vision_interpreter re-exports from light-vision if available, else inline minimal
   if (light) {
-    write('src/agent/vision/vision_interpreter.js', light.replace(
-      /export function addBrowserViewer[\s\S]*$/,
-      ''
-    ) + `
-export default { VisionInterpreter, Camera, describeScene };
-`);
+    write('src/agent/vision/vision_interpreter.js', light.replace(/export function addBrowserViewer[\s\S]*$/, '') + '\nexport default { VisionInterpreter, Camera, describeScene };\n');
     console.log('[fetch-base] LIGHT vision installed');
   } else {
-    writeStub('src/agent/vision/vision_interpreter.js', `export class VisionInterpreter {
-  constructor(agent) {
-    this.agent = agent;
-    this.allow_vision = true;
-    this.camera = null;
-    console.log('[VISION] minimal light');
-  }
-  getCenterBlockInfo() {
-    try {
-      const b = this.agent.bot.blockAtCursor?.(5);
-      return b ? b.name + ' ' + b.position : 'nenhum';
-    } catch { return 'nenhum'; }
-  }
-  async lookAtPlayer(n) { return 'Olhando ' + n + ' | ' + this.getCenterBlockInfo(); }
-  async lookAtPosition(x,y,z) { return 'Olhando ' + x + ',' + y + ',' + z; }
-  async analyzeImage() { return this.getCenterBlockInfo(); }
-}
-`);
+    writeStub('src/agent/vision/vision_interpreter.js',
+      'export class VisionInterpreter {\n' +
+      '  constructor(agent) { this.agent = agent; this.allow_vision = true; this.camera = null; }\n' +
+      '  getCenterBlockInfo() { try { const b = this.agent.bot.blockAtCursor?.(5); return b ? b.name + \' \' + b.position : \'nenhum\'; } catch { return \'nenhum\'; } }\n' +
+      '  async lookAtPlayer(n) { return \'Olhando \' + n; }\n' +
+      '  async lookAtPosition(x,y,z) { return \'Olhando\'; }\n' +
+      '  async analyzeImage() { return this.getCenterBlockInfo(); }\n}\n'
+    );
   }
 }
 
@@ -230,26 +200,25 @@ try {
   installLightVision();
 
   writeFileSync(join(ROOT, 'src', 'settings.js'), "import settings from '../settings.js';\nexport default settings;\n");
-  writeStub('src/agent/settings.js', `let settings = {};
-export default settings;
-export function setSettings(new_settings) {
-    Object.keys(settings).forEach(k => delete settings[k]);
-    Object.assign(settings, new_settings);
-    if (!settings.minecraft_version || settings.minecraft_version === 'auto' || settings.minecraft_version === false) {
-        settings.minecraft_version = process.env.MC_VERSION || '1.21.11';
-    }
-    // force light vision + viewer ON by default (survives restart)
-    settings.allow_vision = true;
-    settings.render_bot_view = true;
-    settings.show_bot_views = true;
-}
-`);
+  writeStub('src/agent/settings.js',
+    'let settings = {};\n' +
+    'export default settings;\n' +
+    'export function setSettings(new_settings) {\n' +
+    '    Object.keys(settings).forEach(k => delete settings[k]);\n' +
+    '    Object.assign(settings, new_settings);\n' +
+    "    if (!settings.minecraft_version || settings.minecraft_version === 'auto' || settings.minecraft_version === false) {\n" +
+    "        settings.minecraft_version = process.env.MC_VERSION || '1.21.11';\n" +
+    '    }\n' +
+    '    settings.allow_vision = true;\n' +
+    '    settings.render_bot_view = true;\n' +
+    '    settings.show_bot_views = true;\n' +
+    '}\n'
+  );
   copyStub('stubs/math.js', 'src/utils/math.js');
   copyStub('stubs/examples.js', 'src/utils/examples.js');
   copyStub('stubs/agent_process.js', 'src/process/agent_process.js');
   copyStub('stubs/coder.js', 'src/agent/coder.js');
   copyStub('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
-
   console.log('[fetch-base] Ready (light vision)');
 } catch (e) {
   console.error('[fetch-base]', e.message);
