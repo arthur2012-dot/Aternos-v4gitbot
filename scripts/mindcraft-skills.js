@@ -1,5 +1,5 @@
 /**
- * MINDCRAFT SKILLS — fast dig + cave escape
+ * MINDCRAFT SKILLS — fast dig + cave escape + tight hole escape
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -26,7 +26,6 @@ async function race(p, ms) {
 export async function goToPosition(bot, x, y, z, minDist = 2) {
   if (!bot?.entity) return false;
   const dist = bot.entity.position.distanceTo(new Vec3(x, y, z));
-  // close enough: sprint walk, no pathfinder delay
   if (dist < 12) {
     try {
       await bot.lookAt(new Vec3(x, y + 1, z), true);
@@ -65,7 +64,7 @@ export async function breakBlockAt(bot, x, y, z) {
 
   try {
     const { digBlock } = await import('./dig-place.js');
-    return await digBlock(bot, block, { retries: 2 });
+    return await digBlock(bot, block);
   } catch {
     try {
       if (bot.tool?.equipForBlock) await bot.tool.equipForBlock(block, { requireHarvest: false });
@@ -106,7 +105,6 @@ export async function collectBlock(bot, blockType, num = 1) {
     });
     if (!block) break;
 
-    // Prefer collectBlock plugin only if close (avoid 45s path)
     const d = bot.entity.position.distanceTo(block.position);
     if (d < 6 && bot.collectBlock?.collect) {
       try {
@@ -218,92 +216,92 @@ export async function placeBlock(bot, blockType, x, y, z) {
   }
 }
 
-/** Dig vertical shaft UP until open sky / high y */
+/** Dig vertical shaft UP + human pillar until surface */
 export async function escapeCave(bot) {
   if (!bot?.entity) return false;
   const startY = bot.entity.position.y;
-  if (startY >= 62) return false;
-  console.log('[SKILL] ESCAPE CAVE from y=' + startY.toFixed(0));
+  console.log('[SKILL] ESCAPE from y=' + startY.toFixed(0));
 
-  for (let step = 0; step < 40 && bot.entity.position.y < 64; step++) {
+  try {
+    const { escapeTight, pillarUp } = await import('./dig-place.js');
+    await escapeTight(bot);
+  } catch {}
+
+  for (let step = 0; step < 30 && bot.entity && bot.entity.position.y < 70; step++) {
     if (bot._dreamPvpActive) break;
     const pf = bot.entity.position.floored();
 
-    // clear head + above
     for (const dy of [1, 2]) {
       const b = bot.blockAt(pf.offset(0, dy, 0));
-      if (b && b.boundingBox === 'block' && !/bedrock|barrier/.test(b.name)) {
+      if (b && b.boundingBox === 'block' && !/bedrock|barrier/.test(b.name || '')) {
         await breakBlockAt(bot, b.position.x, b.position.y, b.position.z);
       }
     }
 
-    // pillar if needed
     try {
-      const { placeUnderFeet } = await import('./dig-place.js');
-      await placeUnderFeet(bot);
-    } catch {}
+      const { pillarUp } = await import('./dig-place.js');
+      await pillarUp(bot, 1);
+    } catch {
+      try {
+        const { placeUnderFeet } = await import('./dig-place.js');
+        await placeUnderFeet(bot);
+        bot.setControlState('jump', true);
+        await sleep(80);
+        bot.setControlState('jump', false);
+      } catch {}
+    }
 
-    bot.setControlState('jump', true);
-    await sleep(200);
-    bot.setControlState('jump', false);
-    await sleep(100);
-
-    // if still stuck sideways, open one wall
-    if (step % 5 === 4) {
-      const yaw = bot.entity.yaw;
-      const fx = Math.round(-Math.sin(yaw)) || 1;
-      const fz = Math.round(-Math.cos(yaw));
-      const wall = bot.blockAt(pf.offset(fx, 1, fz));
-      if (wall && wall.boundingBox === 'block' && !/bedrock|barrier/.test(wall.name)) {
-        await breakBlockAt(bot, wall.position.x, wall.position.y, wall.position.z);
+    if (step % 3 === 2) {
+      for (const [dx, dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const wall = bot.blockAt(pf.offset(dx, 1, dz));
+        if (wall && wall.boundingBox === 'block' && !/bedrock|barrier/.test(wall.name || '')) {
+          await breakBlockAt(bot, wall.position.x, wall.position.y, wall.position.z);
+          break;
+        }
       }
     }
+
+    bot.setControlState('forward', true);
+    await sleep(150);
+    bot.clearControlStates();
   }
 
-  console.log('[SKILL] escape done y=' + bot.entity.position.y.toFixed(0));
-  return bot.entity.position.y > startY + 2;
+  console.log('[SKILL] escape done y=' + (bot.entity?.position.y ?? 0).toFixed(0));
+  return bot.entity && bot.entity.position.y > startY + 1;
 }
 
 export async function unstuck(bot) {
   if (!bot?.entity || bot._digLocked || bot._dreamPvpActive) return false;
 
-  // if underground long, prefer full cave escape
-  if (bot.entity.position.y < 50) {
-    return escapeCave(bot);
-  }
-
   const pf = bot.entity.position.floored();
   let walls = 0;
-  for (const [dx, dz] of [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1],
-  ]) {
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
     const b = bot.blockAt(pf.offset(dx, 0, dz));
     if (b && b.boundingBox === 'block') walls++;
   }
   const head = bot.blockAt(pf.offset(0, 1, 0));
   const headBlocked = head && head.boundingBox === 'block';
-  if (walls < 2 && !headBlocked) return false;
 
-  console.log('[SKILL] unstuck walls=' + walls);
-  if (headBlocked && head && !/bedrock|barrier/.test(head.name)) {
-    await breakBlockAt(bot, head.position.x, head.position.y, head.position.z);
+  if (walls < 2 && !headBlocked && bot.entity.position.y >= 62) return false;
+
+  console.log('[SKILL] unstuck walls=' + walls + ' y=' + bot.entity.position.y.toFixed(0));
+
+  try {
+    const { escapeTight } = await import('./dig-place.js');
+    if (await escapeTight(bot)) return true;
+  } catch {}
+
+  if (bot.entity.position.y < 62) {
+    return escapeCave(bot);
   }
-  const yaw = bot.entity.yaw;
-  const fx = Math.round(-Math.sin(yaw)) || 1;
-  const fz = Math.round(-Math.cos(yaw));
-  for (const oy of [0, 1]) {
-    const b = bot.blockAt(pf.offset(fx, oy, fz));
-    if (b && b.boundingBox === 'block' && !/bedrock|barrier/.test(b.name)) {
-      await breakBlockAt(bot, b.position.x, b.position.y, b.position.z);
-    }
+
+  if (headBlocked && head && !/bedrock|barrier/.test(head.name || '')) {
+    await breakBlockAt(bot, head.position.x, head.position.y, head.position.z);
   }
   bot.setControlState('forward', true);
   bot.setControlState('jump', true);
   bot.setControlState('sprint', true);
-  await sleep(600);
+  await sleep(500);
   bot.clearControlStates();
   return true;
 }
@@ -324,15 +322,17 @@ export function startMindcraftUnstuck(agent) {
 
   let lastPos = null;
   let still = 0;
-  let undergroundTicks = 0;
   let running = false;
 
   setInterval(async () => {
     if (running || !bot.entity) return;
-    if (bot._digLocked || bot._dreamPvpActive) return;
+    if (bot._dreamPvpActive) return;
 
-    if (bot.entity.position.y < 55) undergroundTicks++;
-    else undergroundTicks = 0;
+    if (bot._digLocked && bot._digLockUntil && Date.now() > bot._digLockUntil) {
+      bot._digLocked = false;
+      try { bot.stopDigging(); } catch {}
+    }
+    if (bot._digLocked) return;
 
     const key =
       Math.floor(bot.entity.position.x) +
@@ -346,14 +346,21 @@ export function startMindcraftUnstuck(agent) {
       lastPos = key;
     }
 
-    // force escape if underground ~60s (24 * 2.5s) or still 4 ticks
-    if (undergroundTicks >= 20 || still >= 4) {
+    const pf = bot.entity.position.floored();
+    let walls = 0;
+    for (const [dx, dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const b = bot.blockAt(pf.offset(dx, 0, dz));
+      if (b && b.boundingBox === 'block') walls++;
+    }
+    const head = bot.blockAt(pf.offset(0, 1, 0));
+    const headBlocked = head && head.boundingBox === 'block';
+
+    if (still >= 3 || walls >= 2 || headBlocked || bot.entity.position.y < 60) {
       running = true;
       try {
-        console.log('[SKILL] force escape still=' + still + ' under=' + undergroundTicks);
-        await escapeCave(bot);
+        console.log('[SKILL] force unstuck still=' + still + ' walls=' + walls);
+        await unstuck(bot);
         still = 0;
-        undergroundTicks = 0;
       } catch (e) {
         console.warn('[SKILL] escape', (e.message || '').slice(0, 40));
       } finally {
@@ -362,7 +369,7 @@ export function startMindcraftUnstuck(agent) {
     }
   }, 2500);
 
-  console.log('[SKILL] unstuck + cave escape ON');
+  console.log('[SKILL] unstuck + tight escape ON');
 }
 
 export function startMindcraftSkills(agent) {
