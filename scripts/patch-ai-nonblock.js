@@ -1,6 +1,5 @@
 /**
- * Disable init Chatting completely.
- * Self-prompt never starts. Chat answers players only, never stops body.
+ * Chat OFF on init. conversing killed. Chatting lock cannot hold body.
  */
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -11,7 +10,6 @@ const agentPath = join(ROOT, 'src/agent/agent.js');
 
 if (existsSync(spPath)) {
   let sp = readFileSync(spPath, 'utf8');
-
   sp = sp.replace(/await this\.agent\.actions\.stop\(\);/g, 'void 0;');
   sp = sp.replace(/this\.agent\.actions\.stop\(\);/g, 'void 0;');
   sp = sp.replace(/MAX_NO_COMMAND = \d+/, 'MAX_NO_COMMAND = 1');
@@ -21,18 +19,16 @@ if (existsSync(spPath)) {
     sp = sp.replace(
       /async start\s*\([^)]*\)\s*\{/,
       `async start(...args) {
-    // [DreamBot] CHAT INIT OFF — no self-prompt ever
+    // [DreamBot] CHAT INIT OFF
     console.log('[DreamBot] self_prompter.start blocked');
     this.loop_active = false;
-    return;
-    /* disabled */`
+    return;`
     );
   }
   if (!sp.includes('[DreamBot] self-prompt disabled')) {
     sp = sp.replace(
       /async startLoop\s*\(\s*\)\s*\{/,
       `async startLoop() {
-    // [DreamBot] self-prompt disabled
     this.loop_active = false;
     return;`
     );
@@ -41,34 +37,28 @@ if (existsSync(spPath)) {
     sp = sp.replace(
       /update\s*\(\s*delta\s*\)\s*\{/,
       `update(delta) {
-    // [DreamBot] no auto self-prompt
     return;`
     );
   }
-
   writeFileSync(spPath, sp);
-  console.log('[ai-nonblock] self_prompter fully blocked');
+  console.log('[ai-nonblock] self_prompter blocked');
 }
 
 if (existsSync(agentPath)) {
   let agent = readFileSync(agentPath, 'utf8');
-
   agent = agent.replace(
     /if\s*\(\s*this\.self_prompter\s*&&\s*!this\.self_prompter\.isActive\(\)\s*\)\s*\{\s*this\.self_prompter\.start\([^)]*\);\s*\}/gs,
     '/* no init chat */'
   );
   agent = agent.replace(/this\.self_prompter\.start\([^)]*\);/g, '/* no init chat */');
-
   agent = agent.replace(
     /this\.openChat\(["']Hello world! I am ["']\s*\+\s*this\.name\);/g,
-    `console.log('[DreamBot] spawn silent — no init chat');`
+    `console.log('[DreamBot] spawn silent');`
   );
-
   agent = agent.replace(/await this\.actions\.stop\(\);/g, 'void 0;');
   agent = agent.replace(/this\.actions\.stop\(\);/g, 'void 0;');
-
   writeFileSync(agentPath, agent);
-  console.log('[ai-nonblock] agent init chat OFF');
+  console.log('[ai-nonblock] agent init OFF');
 }
 
 for (const rel of ['settings.js', 'src/settings.js']) {
@@ -78,6 +68,18 @@ for (const rel of ['settings.js', 'src/settings.js']) {
   const n = t.replace(/init_message:\s*["'][^"']*["']/, 'init_message: ""');
   if (n !== t) {
     writeFileSync(p, n);
-    console.log('[ai-nonblock] wiped init_message in', rel);
+    console.log('[ai-nonblock] wiped init_message', rel);
   }
+}
+
+for (const rel of ['profiles/dream.json']) {
+  const p = join(ROOT, rel);
+  if (!existsSync(p)) continue;
+  try {
+    const d = JSON.parse(readFileSync(p, 'utf8'));
+    d.conversing = false;
+    d.coding = false;
+    writeFileSync(p, JSON.stringify(d, null, 2) + '\n');
+    console.log('[ai-nonblock] conversing=false', rel);
+  } catch {}
 }

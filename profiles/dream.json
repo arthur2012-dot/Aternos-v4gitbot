@@ -5,7 +5,7 @@
     "model": "openai/gpt-oss-20b"
   },
   "coding": false,
-  "conversing": true,
+  "conversing": false,
   "modes": {
     "self_preservation": true,
     "cowardice": false,
@@ -21,7 +21,7 @@
   "max_commands": 3,
   "only_chat_with": [],
   "conv_depth": 1,
-  "max_messages": 2,
+  "max_messages": 1,
   "stateless": true,
   "save_memory": true,
   "blocked_actions": [
@@ -33,5 +33,5 @@
   "skin": {
     "model": "steve"
   },
-  "persona": "Voce e o DreamBot. Fala PT-BR curto. Nunca diga que e bot. O corpo se move sozinho (passivo). Chat so responde jogador quando falarem com voce — nunca inicie conversa, nunca repita objetivos, nunca use !comando sozinho."
+  "persona": "Voce e o DreamBot. Corpo passivo. Chat desligado."
 }
