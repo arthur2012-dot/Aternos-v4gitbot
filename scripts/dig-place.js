@@ -1,13 +1,13 @@
 /**
  * Dig + Place + Pillar (human timing) — pure code, Mindcraft-compatible.
- * Jump → mid-air place under feet → optional dig above head.
+ * Jump → mid-air place under feet → dig above head.
  * Never yaw-spin while digging.
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const Vec3 = require('vec3').Vec3;
 
-const BUILD_RE = /dirt|cobblestone|netherrack|planks|stone$|andesite|granite|diorite|tuff|deepslate|cobbled/;
+const BUILD_RE = /dirt|cobblestone|netherrack|planks|stone$|andesite|granite|diorite|tuff|deepslate|cobbled|grass_block/;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function scaffoldItem(bot) {
@@ -34,21 +34,22 @@ export async function digBlock(bot, block) {
   if (/bedrock|barrier|command|end_portal|reinforced/.test(block.name || '')) return false;
   if (bot._digLocked) return false;
   bot._digLocked = true;
+  bot._digLockUntil = Date.now() + 10000;
   try {
     const items = bot.inventory.items();
     const n = block.name || '';
     let tool = null;
     if (/_log$|planks|leaves/.test(n)) tool = items.find((i) => /_axe$/.test(i.name));
-    else if (/dirt|sand|gravel|grass|clay|mud|snow/.test(n)) tool = items.find((i) => /_shovel$/.test(i.name));
+    else if (/dirt|sand|gravel|grass|clay|mud|snow/.test(n))
+      tool = items.find((i) => /_shovel$/.test(i.name));
     else tool = items.find((i) => /_pickaxe$/.test(i.name));
     if (tool) {
       try {
         await bot.equip(tool, 'hand');
       } catch {}
     }
-    // ONE look only — never change yaw while digging
     await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
-    await race(bot.dig(block, true), 9000); // forceLook=true keeps head locked
+    await race(bot.dig(block, true), 9000);
     return true;
   } catch {
     try {
@@ -61,11 +62,9 @@ export async function digBlock(bot, block) {
 }
 
 /**
- * Human pillar jump:
- * 1. Look straight down
- * 2. Jump
- * 3. While airborne (y velocity > 0 or not onGround), place block under feet FAST
- * 4. Land, repeat
+ * Human pillar:
+ * look down → short jump → place under feet WHILE airborne → land
+ * No double-hop, no random yaw.
  */
 export async function pillarUp(bot, times = 1) {
   if (!bot?.entity) return false;
@@ -77,69 +76,74 @@ export async function pillarUp(bot, times = 1) {
     return false;
   }
 
-  // Look straight down once
   try {
     await bot.look(bot.entity.yaw, Math.PI / 2, true);
   } catch {}
 
+  let anyOk = false;
   for (let i = 0; i < times; i++) {
     if (!bot.entity) break;
-    // Jump
+
+    // single short jump pulse
     bot.setControlState('jump', true);
-    await sleep(40); // ~2 ticks — become airborne
+    await sleep(50);
     bot.setControlState('jump', false);
 
-    // Wait until we are clearly above the block we stand on
     const startY = bot.entity.position.y;
     let placed = false;
-    for (let t = 0; t < 8; t++) {
-      await sleep(25);
+
+    // mid-air window ~150-250ms after jump start
+    for (let t = 0; t < 10; t++) {
+      await sleep(20);
       if (!bot.entity) break;
-      // Place when feet are high enough (human mid-air window)
-      if (bot.entity.position.y > startY + 0.35 || !bot.entity.onGround) {
-        const under = bot.blockAt(bot.entity.position.offset(0, -1, 0).floored());
-        const ref =
-          under && under.boundingBox === 'block'
-            ? under
-            : bot.blockAt(bot.entity.position.floored().offset(0, -1, 0));
-        if (ref && ref.boundingBox === 'block') {
-          try {
-            // Prefer internal forceLook place (pathfinder-style)
-            if (typeof bot._placeBlockWithOptions === 'function') {
-              await race(
-                bot._placeBlockWithOptions(ref, new Vec3(0, 1, 0), {
-                  forceLook: true,
-                  swingArm: 'right',
-                }),
-                800
-              );
-            } else {
-              await race(bot.placeBlock(ref, new Vec3(0, 1, 0)), 800);
-            }
-            placed = true;
-            break;
-          } catch {}
+      const risen = bot.entity.position.y > startY + 0.25;
+      const airborne = !bot.entity.onGround;
+      if (!risen && !airborne) continue;
+
+      const feet = bot.entity.position.floored();
+      let ref = bot.blockAt(feet.offset(0, -1, 0));
+      if (!ref || ref.boundingBox !== 'block') {
+        ref = bot.blockAt(feet.offset(0, -2, 0));
+      }
+      if (!ref || ref.boundingBox !== 'block') continue;
+
+      try {
+        if (typeof bot._placeBlockWithOptions === 'function') {
+          await race(
+            bot._placeBlockWithOptions(ref, new Vec3(0, 1, 0), {
+              forceLook: true,
+              swingArm: 'right',
+            }),
+            600
+          );
+        } else {
+          await race(bot.placeBlock(ref, new Vec3(0, 1, 0)), 600);
         }
+        placed = true;
+        anyOk = true;
+        break;
+      } catch {
+        try {
+          bot.activateItem();
+          await sleep(50);
+        } catch {}
       }
     }
-    // Land
-    await sleep(180);
-    if (!placed && i === 0) return false;
+
+    await sleep(150);
+    if (!placed && i === 0) break;
   }
   bot.clearControlStates();
-  return true;
+  return anyOk;
 }
 
 /**
- * Escape 1-high / tight hole like a player:
- * - Dig block above head (if solid)
- * - Dig face / walls if needed
- * - Pillar up with dirt (jump + mid-air place)
- * - Never random-yaw
+ * Escape tight 1x1 / hole:
+ * dig head → dig above → dig walls → pillar → step forward
  */
 export async function escapeTight(bot) {
   if (!bot?.entity) return false;
-  if (bot._digLocked || bot._dreamEscaping) return false;
+  if (bot._dreamEscaping) return false;
   bot._dreamEscaping = true;
   try {
     const p = bot.entity.position.floored();
@@ -157,11 +161,10 @@ export async function escapeTight(bot) {
     }
     const headSolid = head && head.boundingBox === 'block';
     const tight = walls >= 2 || headSolid;
-    if (!tight && !headSolid) return false;
+    if (!tight && bot.entity.position.y >= 62) return false;
 
-    console.log('[DIG] escapeTight walls=' + walls + ' head=' + (head?.name || 'air'));
+    console.log('[DIG] escapeTight walls=' + walls + ' head=' + (head?.name || 'air') + ' y=' + bot.entity.position.y.toFixed(0));
 
-    // 1) Dig ABOVE head first (priority — free vertical space)
     if (headSolid && !/bedrock|barrier/.test(head.name || '')) {
       await digBlock(bot, head);
     }
@@ -169,7 +172,6 @@ export async function escapeTight(bot) {
       await digBlock(bot, above);
     }
 
-    // 2) Dig face / adjacent walls (no turn — use current look + fixed offsets)
     const cells = [
       [0, 1, 0],
       [1, 0, 0],
@@ -186,24 +188,23 @@ export async function escapeTight(bot) {
       const b = bot.blockAt(p.offset(ox, oy, oz));
       if (b && b.boundingBox === 'block' && !/bedrock|barrier/.test(b.name || '')) {
         if (await digBlock(bot, b)) dug++;
-        if (dug >= 4) break;
+        if (dug >= 3) break;
       }
     }
 
-    // 3) Pillar up 1–2 blocks (jump + mid-air place)
     const sc = scaffoldItem(bot);
     if (sc && sc.count > 0) {
       await pillarUp(bot, Math.min(2, sc.count));
     }
 
-    // 4) Forward + single clean jump (no double-hop)
     bot.setControlState('forward', true);
+    bot.setControlState('sprint', true);
     if (bot.entity.onGround) {
       bot.setControlState('jump', true);
-      await sleep(100);
+      await sleep(80);
       bot.setControlState('jump', false);
     }
-    await sleep(300);
+    await sleep(350);
     bot.clearControlStates();
     return true;
   } catch (e) {
@@ -211,11 +212,12 @@ export async function escapeTight(bot) {
     return false;
   } finally {
     bot._dreamEscaping = false;
-    bot.clearControlStates();
+    try {
+      bot.clearControlStates();
+    } catch {}
   }
 }
 
-/** Place under feet (scaffold while standing) — used by pathfinder helpers */
 export async function placeUnderFeet(bot) {
   if (!bot?.entity) return false;
   const sc = scaffoldItem(bot);
@@ -246,6 +248,12 @@ export async function placeFront() {
   return false;
 }
 export async function digFrontWall() {
+  return false;
+}
+export async function bridgeForward() {
+  return false;
+}
+export async function collectNearby() {
   return false;
 }
 export { scaffoldItem };
