@@ -1,6 +1,5 @@
 /**
- * MINDCRAFT-CORE v3 — uses real mindcraft-skills API
- * collectBlock / goToPosition / craftRecipe / breakBlockAt from mindcraft-skills.js
+ * MINDCRAFT-CORE v4 — fast dig + PRIORITY leave cave
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -36,10 +35,6 @@ function has(items, re) {
   return items.some((i) => r.test(i.name));
 }
 
-function busy(bot) {
-  return !!(bot._digLocked || bot._dreamPvpActive || bot._mcCoreBusy || bot.targetDigBlock);
-}
-
 function freeSlots(bot) {
   try {
     return bot.inventory.emptySlotCount();
@@ -56,13 +51,12 @@ async function manageInventory(bot) {
     if (dirt) {
       try {
         await bot.toss(dirt.type, null, Math.min(dirt.count, dirtN - 32));
-        console.log('[MC] toss dirt');
       } catch {}
     }
   }
   if (freeSlots(bot) < 3) {
     const junk = items.find((i) =>
-      /dirt|gravel|andesite|diorite|granite|netherrack|seeds|rotten|poisonous/.test(i.name)
+      /dirt|gravel|andesite|diorite|granite|netherrack|seeds|rotten/.test(i.name)
     );
     if (junk) {
       try {
@@ -74,17 +68,14 @@ async function manageInventory(bot) {
 
 async function equipBest(bot, forWhat = 'pick') {
   const items = inv(bot);
-  let tool = null;
-  if (forWhat === 'axe') {
-    tool =
-      items.find((i) => /netherite_axe|diamond_axe|iron_axe|stone_axe|wooden_axe/.test(i.name));
-  } else if (forWhat === 'sword') {
-    tool = items.find((i) => /_sword$/.test(i.name));
-  } else {
-    tool = items.find((i) =>
-      /netherite_pickaxe|diamond_pickaxe|iron_pickaxe|stone_pickaxe|wooden_pickaxe/.test(i.name)
-    );
-  }
+  let tool =
+    forWhat === 'axe'
+      ? items.find((i) => /netherite_axe|diamond_axe|iron_axe|stone_axe|wooden_axe/.test(i.name))
+      : forWhat === 'sword'
+        ? items.find((i) => /_sword$/.test(i.name))
+        : items.find((i) =>
+            /netherite_pickaxe|diamond_pickaxe|iron_pickaxe|stone_pickaxe|wooden_pickaxe/.test(i.name)
+          );
   if (tool) {
     try {
       await bot.equip(tool, 'hand');
@@ -96,86 +87,42 @@ async function equipBest(bot, forWhat = 'pick') {
 
 async function collectType(bot, names, howMany = 1, toolHint = 'pick') {
   await equipBest(bot, toolHint);
-
-  // Prefer Mindcraft skill API
   if (bot.mc?.collectBlock) {
-    const primary = names[0];
-    // map groups
-    let type = primary;
+    let type = names[0];
     if (names.some((n) => n.includes('_log'))) type = 'log';
     if (names.includes('stone') || names.includes('cobblestone')) type = 'cobblestone';
     if (names.some((n) => n.includes('iron_ore'))) type = 'iron_ore';
     if (names.some((n) => n.includes('coal'))) type = 'coal_ore';
-    const ok = await bot.mc.collectBlock(type, howMany);
-    if (ok) return true;
+    if (await bot.mc.collectBlock(type, howMany)) return true;
   }
-
-  // Fallback: collectBlock plugin / dig
   const set = new Set(names);
   let got = 0;
   for (let i = 0; i < howMany; i++) {
-    if (busy(bot)) break;
-    const block = bot.findBlock({
-      matching: (b) => b && set.has(b.name),
-      maxDistance: 48,
-    });
+    if (bot._digLocked) break;
+    const block = bot.findBlock({ matching: (b) => b && set.has(b.name), maxDistance: 32 });
     if (!block) break;
-    try {
-      if (bot.collectBlock?.collect) {
-        await bot.collectBlock.collect(block, { ignoreNoPath: true });
-        got++;
-        continue;
-      }
-    } catch {}
-    if (bot.mc?.goToPosition) {
-      await bot.mc.goToPosition(block.position.x, block.position.y, block.position.z, 2);
-    }
+    if (bot.mc?.goToPosition) await bot.mc.goToPosition(block.position.x, block.position.y, block.position.z, 2);
     if (bot.mc?.breakBlockAt) {
       if (await bot.mc.breakBlockAt(block.position.x, block.position.y, block.position.z)) got++;
-    } else {
-      try {
-        const { digBlock } = await import('./dig-place.js');
-        if (await digBlock(bot, bot.blockAt(block.position))) got++;
-      } catch {}
     }
   }
   return got > 0;
 }
 
 async function craft(bot, itemName, qty = 1) {
-  if (bot.mc?.craftRecipe) {
-    const ok = await bot.mc.craftRecipe(itemName, qty);
-    if (ok) return true;
-  }
+  if (bot.mc?.craftRecipe && (await bot.mc.craftRecipe(itemName, qty))) return true;
   try {
     const mcData = require('minecraft-data')(bot.version);
     const item = mcData.itemsByName[itemName];
     if (!item) return false;
-    let table = bot.findBlock({
-      matching: mcData.blocksByName.crafting_table?.id,
-      maxDistance: 16,
-    });
-    if (!table && count(inv(bot), 'crafting_table') >= 1) {
-      if (bot.mc?.placeBlock) {
-        const p = bot.entity.position.floored();
-        await bot.mc.placeBlock('crafting_table', p.x + 1, p.y, p.z);
-      }
-      table = bot.findBlock({
-        matching: mcData.blocksByName.crafting_table?.id,
-        maxDistance: 8,
-      });
-    }
+    let table = bot.findBlock({ matching: mcData.blocksByName.crafting_table?.id, maxDistance: 16 });
     let recipes = bot.recipesFor(item.id, null, 1, table || null);
     if (!recipes?.length) recipes = bot.recipesFor(item.id, null, 1, true);
     if (!recipes?.length) return false;
-    if (table && bot.mc?.goToPosition) {
-      await bot.mc.goToPosition(table.position.x, table.position.y, table.position.z, 2);
-    }
     await bot.craft(recipes[0], qty, table || null);
     console.log('[MC] craft', itemName);
     return true;
-  } catch (e) {
-    console.warn('[MC] craft', itemName, (e.message || '').slice(0, 30));
+  } catch {
     return false;
   }
 }
@@ -198,7 +145,7 @@ async function placeItem(bot, itemName) {
 async function eat(bot) {
   if (bot.food >= 16) return false;
   const food = inv(bot).find((i) =>
-    /beef|pork|chicken|mutton|bread|apple|carrot|potato|cod|salmon|cooked_/.test(i.name)
+    /beef|pork|chicken|mutton|bread|apple|carrot|potato|cooked_/.test(i.name)
   );
   if (!food) return false;
   try {
@@ -220,50 +167,28 @@ async function hunt(bot) {
   );
   if (!prey) return false;
   await equipBest(bot, 'sword');
-  if (bot.mc?.goToPosition) {
-    await bot.mc.goToPosition(prey.position.x, prey.position.y, prey.position.z, 2);
-  }
-  for (let i = 0; i < 12; i++) {
+  if (bot.mc?.goToPosition) await bot.mc.goToPosition(prey.position.x, prey.position.y, prey.position.z, 2);
+  for (let i = 0; i < 10; i++) {
     const live = bot.entities[prey.id];
     if (!live) break;
     try {
       await bot.lookAt(live.position.offset(0, 1, 0), true);
       await bot.attack(live);
     } catch {}
-    await sleep(350);
+    await sleep(300);
   }
-  if (bot.mc?.pickupNearbyItems) await bot.mc.pickupNearbyItems();
-  return true;
-}
-
-async function goSurface(bot) {
-  if (bot.entity.position.y >= 60) return false;
-  console.log('[MC] surface y=' + bot.entity.position.y.toFixed(0));
-  const pf = bot.entity.position.floored();
-  for (let dy = 1; dy <= 3; dy++) {
-    const b = bot.blockAt(pf.offset(0, dy, 0));
-    if (b && b.boundingBox === 'block' && !/bedrock|barrier/.test(b.name)) {
-      if (bot.mc?.breakBlockAt) {
-        await bot.mc.breakBlockAt(b.position.x, b.position.y, b.position.z);
-      }
-    }
-  }
-  bot.setControlState('jump', true);
-  bot.setControlState('forward', true);
-  await sleep(800);
-  bot.clearControlStates();
-  try {
-    const { placeUnderFeet } = await import('./dig-place.js');
-    for (let i = 0; i < 4 && bot.entity.position.y < 60; i++) {
-      await placeUnderFeet(bot);
-      await sleep(200);
-    }
-  } catch {}
   return true;
 }
 
 function nextGoal(bot) {
   const items = inv(bot);
+  const y = bot.entity.position.y;
+
+  // PRIORITY #1: leave cave — never stay underground for hours
+  if (y < 55) {
+    return { kind: 'surface', label: 'ESCAPE_CAVE' };
+  }
+
   const logs = count(items, /_log$/);
   const planks = count(items, /_planks$/);
   const sticks = count(items, 'stick');
@@ -289,34 +214,18 @@ function nextGoal(bot) {
     return { kind: 'collect', names: ['coal_ore', 'deepslate_coal_ore'], n: 4, tool: 'pick', label: 'coal' };
   if (count(items, 'furnace') < 1 && !has(items, /iron_ingot|iron_pickaxe/) && cobble >= 8)
     return { kind: 'craft', item: 'furnace', n: 1, label: 'furnace' };
-  if (bot.food < 14 || count(items, /beef|pork|chicken|mutton|bread|cooked_/) < 2)
-    return { kind: 'food', label: 'food' };
+  if (bot.food < 14) return { kind: 'food', label: 'food' };
   if (!hasIronPick && count(items, /raw_iron|iron_ore|iron_ingot/) < 3)
     return { kind: 'collect', names: ['iron_ore', 'deepslate_iron_ore'], n: 4, tool: 'pick', label: 'iron' };
-  if (bot.entity.position.y < 50 && !hasIronPick) return { kind: 'surface', label: 'surface' };
   return { kind: 'explore', label: 'explore' };
 }
 
 async function explore(bot) {
   bot.setControlState('forward', true);
   bot.setControlState('sprint', true);
-  if (Math.random() < 0.3) bot.setControlState('jump', true);
-  await sleep(2200);
+  if (Math.random() < 0.4) bot.setControlState('jump', true);
+  await sleep(1800);
   bot.clearControlStates();
-  try {
-    const yaw = bot.entity.yaw;
-    const dx = Math.round(-Math.sin(yaw));
-    const dz = Math.round(-Math.cos(yaw));
-    const front = bot.blockAt(bot.entity.position.floored().offset(dx, 0, dz));
-    if (front && /leaves|_log$/.test(front.name) && bot.mc?.breakBlockAt) {
-      await bot.mc.breakBlockAt(front.position.x, front.position.y, front.position.z);
-    } else if (front && /dirt|grass|sand/.test(front.name)) {
-      bot.setControlState('jump', true);
-      bot.setControlState('forward', true);
-      await sleep(400);
-      bot.clearControlStates();
-    }
-  } catch {}
 }
 
 export function startMindcraftCore(agent) {
@@ -338,6 +247,10 @@ export function startMindcraftCore(agent) {
       console.log('[MC] goal', goal.label, 'y=' + bot.entity.position.y.toFixed(0));
 
       switch (goal.kind) {
+        case 'surface':
+          if (bot.mc?.escapeCave) await bot.mc.escapeCave();
+          else if (bot.mc?.unstuck) await bot.mc.unstuck();
+          break;
         case 'collect':
           await collectType(bot, goal.names, goal.n || 1, goal.tool || 'pick');
           break;
@@ -351,9 +264,6 @@ export function startMindcraftCore(agent) {
         case 'food':
           if (!(await eat(bot))) await hunt(bot);
           break;
-        case 'surface':
-          await goSurface(bot);
-          break;
         default:
           await explore(bot);
       }
@@ -365,7 +275,8 @@ export function startMindcraftCore(agent) {
     }
   };
 
-  setInterval(tick, 8000);
-  setTimeout(tick, 4000);
-  console.log('[MC] core v3 ON — uses Mindcraft skills API');
+  // faster loop when needs to escape; always 4s
+  setInterval(tick, 4000);
+  setTimeout(tick, 2000);
+  console.log('[MC] core v4 ON — fast dig + priority cave escape');
 }
