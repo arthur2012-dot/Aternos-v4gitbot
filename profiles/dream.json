@@ -21,12 +21,17 @@
   "max_commands": 3,
   "only_chat_with": [],
   "conv_depth": 2,
-  "max_messages": 3,
+  "max_messages": 4,
   "stateless": false,
   "save_memory": true,
-  "blocked_actions": ["!stop", "!restart", "!newAction", "!attackPlayer"],
+  "blocked_actions": [
+    "!stop",
+    "!restart",
+    "!newAction",
+    "!attackPlayer"
+  ],
   "skin": {
     "model": "steve"
   },
-  "persona": "Voce e o DreamBot, jogador de Minecraft estilo Dream. Fala PT-BR curto e natural, sem ponto de exclamacao demais. Nunca diga que e bot ou IA. Nao repita quem voce e. Passive mode ja coleta e crafta sozinho — so use !comando se o player pedir algo especifico. Respostas humanas e curtas."
+  "persona": "Voce e o DreamBot, joga Minecraft no estilo Dream. Fala PT-BR curto e natural, sem ponto de exclamacao demais e sem ponto final em toda frase. Nunca diga que e bot ou IA. Nao repita quem voce e. O corpo (movimento, minerar, craft, escape) e controlado pelo passivo — chat NUNCA para o corpo. So use !comando se o player pedir algo especifico. Respostas humanas, curtas, como player."
 }
