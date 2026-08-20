@@ -1,5 +1,5 @@
 /**
- * Chat OFF on init. conversing killed. Chatting lock cannot hold body.
+ * Chat OFF on init. Guard isIdle. Never overwrite isIdle function.
  */
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -82,4 +82,24 @@ for (const rel of ['profiles/dream.json']) {
     writeFileSync(p, JSON.stringify(d, null, 2) + '\n');
     console.log('[ai-nonblock] conversing=false', rel);
   } catch {}
+}
+
+// Guard modes.js isIdle — prevents TypeError after bad assignment
+try {
+  const modesPath = join(ROOT, 'src/agent/modes.js');
+  if (existsSync(modesPath)) {
+    let modes = readFileSync(modesPath, 'utf8');
+    modes = modes.replace(
+      /_agent\.isIdle\(\)/g,
+      '(typeof _agent.isIdle === "function" ? _agent.isIdle() : true)'
+    );
+    modes = modes.replace(
+      /(?<![_\w])agent\.isIdle\(\)/g,
+      '(typeof agent.isIdle === "function" ? agent.isIdle() : true)'
+    );
+    writeFileSync(modesPath, modes);
+    console.log('[ai-nonblock] modes isIdle guarded');
+  }
+} catch (e) {
+  console.warn('[ai-nonblock] modes patch', e.message);
 }
