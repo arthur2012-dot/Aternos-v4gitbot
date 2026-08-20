@@ -22,6 +22,7 @@ copy('scripts/autobot-skills.js', 'src/agent/autobot-skills.js');
 copy('scripts/house-builder.js', 'src/agent/house-builder.js');
 copy('scripts/danger-detect.js', 'src/agent/danger-detect.js');
 copy('scripts/env-navigation.js', 'src/agent/env-navigation.js');
+copy('scripts/kill-chat.js', 'src/agent/kill-chat.js');
 copy('scripts/nav-stack.js', 'src/agent/nav-stack.js');
 copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
 copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
@@ -86,6 +87,10 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
                 startEnvNavigation(this);
             } catch (e) { console.warn('[DreamBot] env-nav', e.message); }
             try {
+                const { startKillChat } = await import('./kill-chat.js');
+                startKillChat(this);
+            } catch (e) { console.warn('[DreamBot] killchat', e.message); }
+            try {
                 const { startKonekoBehaviors } = await import('./koneko-behaviors.js');
                 await startKonekoBehaviors(this);
             } catch (e) { console.warn('[DreamBot] koneko', e.message); }
@@ -134,5 +139,17 @@ if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startEnvNavigati
   );
 }
 
+if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startKillChat')) {
+  agent = agent.replace(
+    /startEnvNavigation\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] env-nav', e\.message\); \}/,
+    `startEnvNavigation(this);
+            } catch (e) { console.warn('[DreamBot] env-nav', e.message); }
+            try {
+                const { startKillChat } = await import('./kill-chat.js');
+                startKillChat(this);
+            } catch (e) { console.warn('[DreamBot] killchat', e.message); }`
+  );
+}
+
 writeFileSync(agentPath, agent);
-console.log('[post-wire] full stack + env-navigation');
+console.log('[post-wire] full stack + kill-chat');
