@@ -1,2 +1,2 @@
-DREAMBOT_BUILD=2026-08-20-PURE-v7-stable-emergent
-FIX=2.8s still → forceUnstuck + dig face soft + escapeHole when trapped | variance kept | no rigid stage lock
+DREAMBOT_BUILD=2026-08-20-PURE-v8-openness-scorer
+FIX=no random spin — chooseBestYaw samples directions and picks highest openness score

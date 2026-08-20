@@ -1,7 +1,8 @@
 /**
- * pure-survival v7 — stable + emergent
- * Goal: recover fast from freeze/hole/water without turning into a pure stage machine.
- * Reference: Emergent Garden "4 AIs Survive 10 Days" — natural recovery, variance, light chaos.
+ * pure-survival v8 — Openness Scorer
+ * Replaces random yaw with directional probing:
+ * samples candidate headings, scores air/soft/hard ahead, picks best escape/explore vector.
+ * Stable + intelligent, still non-mechanical.
  */
 
 import pathfinderPkg from 'mineflayer-pathfinder';
@@ -12,7 +13,6 @@ import { Vec3 } from 'vec3';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
-// optional escape helpers (loaded lazily)
 let escapeHoleFn = null;
 let isTrappedFn = null;
 try {
@@ -118,10 +118,10 @@ async function stopNav(bot) {
   } catch {}
 }
 
-function blockInFace(bot) {
+function blockInFace(bot, yawOverride = null) {
   try {
     const p = bot.entity.position;
-    const yaw = bot.entity.yaw;
+    const yaw = yawOverride != null ? yawOverride : bot.entity.yaw;
     const dx = -Math.sin(yaw);
     const dz = -Math.cos(yaw);
     const eye = p.offset(dx * 0.85, 1.05, dz * 0.85);
@@ -134,14 +134,77 @@ function blockInFace(bot) {
 }
 
 /**
- * Soft unstuck — dig soft face if present, otherwise varied turn + walk.
- * Keeps human-like variance (no fixed 180° spin every time).
+ * Openness Scorer — innovative replacement for random yaw.
+ * Samples candidate headings relative to current facing,
+ * scores each by air / soft / hard blocks ahead + slight resource pull.
+ * Returns the yaw with highest score.
  */
+function chooseBestYaw(bot) {
+  const base = bot.entity.yaw;
+  // relative offsets (radians): forward, slight L/R, 90°, 135°, back-bias last
+  const offsets = [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8, Math.PI * 0.9];
+  let bestYaw = base;
+  let bestScore = -999;
+
+  for (const off of offsets) {
+    const yaw = base + off;
+    const dx = -Math.sin(yaw);
+    const dz = -Math.cos(yaw);
+    let score = 0;
+
+    for (let step = 1; step <= 3; step++) {
+      const body = bot.blockAt(
+        bot.entity.position.offset(dx * step, 0.2, dz * step).floored()
+      );
+      const head = bot.blockAt(
+        bot.entity.position.offset(dx * step, 1.1, dz * step).floored()
+      );
+
+      const scoreBlock = (b) => {
+        if (!b || b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') return 12;
+        if (b.boundingBox !== 'block') return 8;
+        if (SOFT_FACE.test(b.name)) return 5; // diggable
+        if (/water|lava/.test(b.name)) return -4;
+        return -8; // hard wall
+      };
+
+      score += scoreBlock(body) * (4 - step);
+      score += scoreBlock(head) * (4 - step);
+    }
+
+    // tiny bonus if a log/ore is roughly in that direction (curiosity pull)
+    try {
+      const interest = bot.findBlock({
+        matching: (b) =>
+          b &&
+          (WOOD_LOG.test(b.name) ||
+            /(iron|coal|copper)_ore|deepslate_.*_ore/.test(b.name)),
+        maxDistance: 18,
+      });
+      if (interest) {
+        const to = interest.position.offset(0.5, 0.5, 0.5).minus(bot.entity.position);
+        const targetYaw = Math.atan2(-to.x, -to.z);
+        let diff = Math.abs(((targetYaw - yaw + Math.PI) % (Math.PI * 2)) - Math.PI);
+        if (diff < 0.9) score += 6;
+      }
+    } catch {}
+
+    // prefer keeping some forward momentum
+    if (Math.abs(off) < 0.3) score += 3;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestYaw = yaw;
+    }
+  }
+
+  return bestYaw;
+}
+
 async function forceUnstuck(bot) {
-  console.log('[PURE] UNSTUCK');
+  console.log('[PURE] UNSTUCK (openness scorer)');
   await stopNav(bot);
 
-  // if heavily trapped, prefer full escape planner
   if (isTrappedFn && isTrappedFn(bot) && escapeHoleFn) {
     try {
       const ok = await escapeHoleFn(bot);
@@ -160,36 +223,38 @@ async function forceUnstuck(bot) {
       await race(bot.dig(face, true), 5500);
       console.log('[PURE] dug face', face.name);
     } catch {
-      try { bot.stopDigging(); } catch {}
+      try {
+        bot.stopDigging();
+      } catch {}
     }
   }
 
-  // varied yaw — not mechanical 180
-  const delta = (Math.random() > 0.5 ? 1 : -1) * (0.9 + Math.random() * 1.4);
+  // innovative: pick best open direction instead of random spin
+  const best = chooseBestYaw(bot);
   try {
-    await bot.look(bot.entity.yaw + delta, -0.15 + Math.random() * 0.1, true);
+    await bot.look(best, -0.1, true);
   } catch {}
 
   bot.setControlState('forward', true);
   bot.setControlState('sprint', true);
   bot.setControlState('jump', true);
-  await sleep(320 + Math.floor(Math.random() * 180));
+  await sleep(350);
   bot.setControlState('jump', false);
-  await sleep(900 + Math.floor(Math.random() * 400));
-  if (Math.random() < 0.6) {
+  await sleep(1000);
+  if (bot.entity.onGround) {
     bot.setControlState('jump', true);
-    await sleep(220);
+    await sleep(200);
     bot.setControlState('jump', false);
   }
-  await sleep(500 + Math.floor(Math.random() * 300));
+  await sleep(600);
   bot.clearControlStates();
 
   return true;
 }
 
-async function walkRaw(bot, seconds = 2.4, yawOffset = 0) {
+async function walkRaw(bot, seconds = 2.4, yawOverride = null) {
+  const yaw = yawOverride != null ? yawOverride : chooseBestYaw(bot);
   try {
-    const yaw = bot.entity.yaw + yawOffset;
     await bot.look(yaw, 0, true);
   } catch {}
   bot.setControlState('forward', true);
@@ -198,7 +263,7 @@ async function walkRaw(bot, seconds = 2.4, yawOffset = 0) {
   while (Date.now() < end) {
     if (blockInFace(bot)) {
       bot.setControlState('jump', true);
-      await sleep(180);
+      await sleep(160);
       bot.setControlState('jump', false);
       const f = blockInFace(bot);
       if (f && SOFT_FACE.test(f.name)) {
@@ -206,24 +271,26 @@ async function walkRaw(bot, seconds = 2.4, yawOffset = 0) {
         try {
           await race(bot.dig(f, true), 3800);
         } catch {
-          try { bot.stopDigging(); } catch {}
+          try {
+            bot.stopDigging();
+          } catch {}
         }
         bot.setControlState('forward', true);
         bot.setControlState('sprint', true);
+      } else {
+        // re-score mid-walk if hard wall
+        const better = chooseBestYaw(bot);
+        try {
+          await bot.look(better, 0, true);
+        } catch {}
       }
     }
-    // human micro-variation
-    if (Math.random() < 0.12 && bot.entity.onGround) {
+    if (Math.random() < 0.1 && bot.entity.onGround) {
       bot.setControlState('jump', true);
-      await sleep(120 + Math.floor(Math.random() * 80));
+      await sleep(140);
       bot.setControlState('jump', false);
     }
-    if (Math.random() < 0.08) {
-      try {
-        await bot.look(bot.entity.yaw + (Math.random() - 0.5) * 0.4, 0, true);
-      } catch {}
-    }
-    await sleep(180 + Math.floor(Math.random() * 60));
+    await sleep(200);
   }
   bot.clearControlStates();
 }
@@ -241,7 +308,7 @@ async function gotoNear(bot, x, y, z, range = 2) {
     try {
       await bot.look(yaw, 0, true);
     } catch {}
-    await walkRaw(bot, 2.3, 0);
+    await walkRaw(bot, 2.3, yaw);
     const moved = bot.entity.position.distanceTo(start);
     if (moved < 1.1) await forceUnstuck(bot);
     return false;
@@ -257,7 +324,9 @@ async function doEat(bot) {
     else {
       bot.activateItem();
       await sleep(1500);
-      try { bot.deactivateItem(); } catch {}
+      try {
+        bot.deactivateItem();
+      } catch {}
     }
     console.log('[PURE] ate', food.name);
     return true;
@@ -273,7 +342,7 @@ async function doFight(bot, entity) {
     const sword = findItem(bot, /sword|_axe$/);
     if (sword) await bot.equip(sword, 'hand');
     bot.pvp.attack(entity);
-    await sleep(700 + Math.floor(Math.random() * 300));
+    await sleep(750);
     return true;
   } catch {
     return false;
@@ -285,7 +354,9 @@ async function digBlock(bot, block) {
   try {
     await stopNav(bot);
     if (bot.tool?.equipForBlock) {
-      try { await bot.tool.equipForBlock(block); } catch {}
+      try {
+        await bot.tool.equipForBlock(block);
+      } catch {}
     } else {
       const tool =
         findItem(bot, /_pickaxe/) ||
@@ -298,7 +369,9 @@ async function digBlock(bot, block) {
     console.log('[PURE] dug', block.name);
     return true;
   } catch (e) {
-    try { bot.stopDigging(); } catch {}
+    try {
+      bot.stopDigging();
+    } catch {}
     return false;
   }
 }
@@ -308,7 +381,9 @@ async function doCollect(bot, block) {
   const start = bot.entity.position.clone();
   try {
     if (bot.pvp?.target) {
-      try { await bot.pvp.stop(); } catch {}
+      try {
+        await bot.pvp.stop();
+      } catch {}
     }
     await stopNav(bot);
 
@@ -323,7 +398,7 @@ async function doCollect(bot, block) {
       }
     }
 
-    const ok = await gotoNear(bot, block.position.x, block.position.y, block.position.z, 2);
+    await gotoNear(bot, block.position.x, block.position.y, block.position.z, 2);
     const still = bot.blockAt(block.position);
     if (still && still.name === block.name) {
       const dug = await digBlock(bot, still);
@@ -404,7 +479,10 @@ function getStage(bot) {
   const logs = countItem(bot, WOOD_LOG);
   const planks = countItem(bot, /_planks$/);
   const sticks = countItem(bot, /^stick$/);
-  const hasWoodPick = !!findItem(bot, /wooden_pickaxe|stone_pickaxe|iron_pickaxe|diamond_pickaxe/);
+  const hasWoodPick = !!findItem(
+    bot,
+    /wooden_pickaxe|stone_pickaxe|iron_pickaxe|diamond_pickaxe/
+  );
   const hasStonePick = !!findItem(bot, /stone_pickaxe|iron_pickaxe|diamond_pickaxe/);
   const cobble = countItem(bot, /cobblestone|cobbled_deepslate/);
   const hasTable =
@@ -423,10 +501,10 @@ function getStage(bot) {
 }
 
 async function runStage(bot, stage) {
-  // small chance to just wander even in early stages — keeps emergent feel
-  if (stage !== 'explore' && Math.random() < 0.08) {
-    console.log('[PURE] soft wander (emergent variance)');
-    await walkRaw(bot, 2.0 + Math.random(), (Math.random() - 0.5) * 1.8);
+  // occasional smart wander (uses Openness Scorer, not random spin)
+  if (stage !== 'explore' && Math.random() < 0.07) {
+    console.log('[PURE] soft wander (scored direction)');
+    await walkRaw(bot, 2.1);
     return true;
   }
 
@@ -442,14 +520,20 @@ async function runStage(bot, stage) {
         console.log('[PURE] target log', log.name);
         return await doCollect(bot, log);
       }
-      console.log('[PURE] no log nearby — walkRaw search');
-      await walkRaw(bot, 2.8 + Math.random(), (Math.random() - 0.5) * 1.6);
+      console.log('[PURE] no log nearby — scored walk');
+      await walkRaw(bot, 2.9);
       return true;
     }
     case 'planks': {
       for (const p of [
-        'oak_planks', 'birch_planks', 'spruce_planks', 'jungle_planks',
-        'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks',
+        'oak_planks',
+        'birch_planks',
+        'spruce_planks',
+        'jungle_planks',
+        'acacia_planks',
+        'dark_oak_planks',
+        'mangrove_planks',
+        'cherry_planks',
       ]) {
         if (await tryCraft(bot, p, 4)) return true;
       }
@@ -468,7 +552,7 @@ async function runStage(bot, stage) {
         maxDistance: 32,
       });
       if (stone) return await doCollect(bot, stone);
-      await walkRaw(bot, 2.4, (Math.random() - 0.5));
+      await walkRaw(bot, 2.4);
       return true;
     }
     case 'stone_pick':
@@ -487,7 +571,7 @@ async function runStage(bot, stage) {
         });
         if (ore) return await doCollect(bot, ore);
       }
-      await walkRaw(bot, 2.6 + Math.random() * 1.2, (Math.random() - 0.5) * 2.2);
+      await walkRaw(bot, 2.8);
       return true;
     }
     default:
@@ -516,7 +600,7 @@ export function startPureSurvival(agent) {
   let lastPos = null;
   let stillSince = Date.now();
   let lastDecision = 0;
-  const DECISION_MS = 850; // slightly faster recovery loop, still not frantic
+  const DECISION_MS = 850;
 
   async function runOnce() {
     if (busy) return;
@@ -528,7 +612,6 @@ export function startPureSurvival(agent) {
 
     const pos = bot.entity.position;
     if (lastPos && pos.distanceTo(lastPos) < 0.35) {
-      // 2.8s still → force recovery (was 3.5s)
       if (Date.now() - stillSince > 2800) {
         busy = true;
         bot._dreamBusy = true;
@@ -567,7 +650,9 @@ export function startPureSurvival(agent) {
         return;
       }
       if (bot.pvp?.target) {
-        try { await bot.pvp.stop(); } catch {}
+        try {
+          await bot.pvp.stop();
+        } catch {}
       }
 
       await tossJunk(bot);
@@ -598,7 +683,9 @@ export function startPureSurvival(agent) {
       .toLowerCase();
     if (m === 'pare' || m === 'stop') {
       stopNav(bot);
-      try { bot.pvp?.stop?.(); } catch {}
+      try {
+        bot.pvp?.stop?.();
+      } catch {}
       busy = false;
       bot._dreamBusy = false;
     }
@@ -612,5 +699,5 @@ export function startPureSurvival(agent) {
     }
   });
 
-  console.log('[PURE] v7 ON — stable recovery + emergent variance');
+  console.log('[PURE] v8 ON — Openness Scorer (no random spin)');
 }
