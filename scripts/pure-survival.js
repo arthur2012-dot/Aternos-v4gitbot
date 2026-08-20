@@ -1,7 +1,7 @@
 /**
- * pure-survival v6 — anti-freeze de andar
- * Bug: bot olha parede de terra 40s sem mexer → pathfinder falhou e travou
- * Fix: se posição não muda 3.5s → cancela path, gira, anda/pula, diga parede se bloquear
+ * pure-survival v7 — stable + emergent
+ * Goal: recover fast from freeze/hole/water without turning into a pure stage machine.
+ * Reference: Emergent Garden "4 AIs Survive 10 Days" — natural recovery, variance, light chaos.
  */
 
 import pathfinderPkg from 'mineflayer-pathfinder';
@@ -12,6 +12,15 @@ import { Vec3 } from 'vec3';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
+// optional escape helpers (loaded lazily)
+let escapeHoleFn = null;
+let isTrappedFn = null;
+try {
+  const esc = await import('./escape-hole.js');
+  escapeHoleFn = esc.escapeHole;
+  isTrappedFn = esc.isTrapped;
+} catch {}
+
 const HOSTILE = new Set([
   'zombie', 'husk', 'drowned', 'skeleton', 'stray', 'creeper',
   'spider', 'cave_spider', 'enderman', 'witch', 'phantom',
@@ -20,6 +29,7 @@ const HOSTILE = new Set([
 
 const WOOD_LOG = /_(log|stem)$/;
 const FOOD = /cooked_|bread|apple|carrot|potato|beef|pork|chicken|mutton|cod|salmon/;
+const SOFT_FACE = /dirt|grass|sand|gravel|clay|snow|podzol|mycelium|farmland|mud|rooted|leaves|netherrack|tuff/;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -108,83 +118,76 @@ async function stopNav(bot) {
   } catch {}
 }
 
-/** Bloco na cara (olhos / peito) */
 function blockInFace(bot) {
   try {
     const p = bot.entity.position;
     const yaw = bot.entity.yaw;
     const dx = -Math.sin(yaw);
     const dz = -Math.cos(yaw);
-    const eye = p.offset(dx * 0.8, 1.0, dz * 0.8);
+    const eye = p.offset(dx * 0.85, 1.05, dz * 0.85);
     const b = bot.blockAt(eye.floored());
     if (b && b.boundingBox === 'block' && b.name !== 'air') return b;
-    const chest = bot.blockAt(p.offset(dx * 0.8, 0.5, dz * 0.8).floored());
+    const chest = bot.blockAt(p.offset(dx * 0.85, 0.55, dz * 0.85).floored());
     if (chest && chest.boundingBox === 'block') return chest;
   } catch {}
   return null;
 }
 
 /**
- * Se parado olhando parede: dig 1–2 blocos OU gira e anda
+ * Soft unstuck — dig soft face if present, otherwise varied turn + walk.
+ * Keeps human-like variance (no fixed 180° spin every time).
  */
 async function forceUnstuck(bot) {
-  console.log('[PURE] UNSTUCK — was frozen facing terrain');
+  console.log('[PURE] UNSTUCK');
   await stopNav(bot);
 
+  // if heavily trapped, prefer full escape planner
+  if (isTrappedFn && isTrappedFn(bot) && escapeHoleFn) {
+    try {
+      const ok = await escapeHoleFn(bot);
+      if (ok) return true;
+    } catch (e) {
+      console.warn('[PURE] escapeHole', (e.message || '').slice(0, 40));
+    }
+  }
+
   const face = blockInFace(bot);
-  if (face && /dirt|grass|sand|gravel|clay|snow/.test(face.name)) {
+  if (face && SOFT_FACE.test(face.name)) {
     try {
       const shovel = findItem(bot, /_shovel/) || findItem(bot, /_pickaxe|_axe/);
       if (shovel) await bot.equip(shovel, 'hand');
       await bot.lookAt(face.position.offset(0.5, 0.5, 0.5), true);
-      await race(bot.dig(face, true), 6000);
+      await race(bot.dig(face, true), 5500);
       console.log('[PURE] dug face', face.name);
     } catch {
-      try {
-        bot.stopDigging();
-      } catch {}
+      try { bot.stopDigging(); } catch {}
     }
   }
 
-  // gira 90–180° e anda com jump
-  const newYaw = bot.entity.yaw + (Math.random() > 0.5 ? 1.2 : -1.2) + Math.PI * 0.3;
+  // varied yaw — not mechanical 180
+  const delta = (Math.random() > 0.5 ? 1 : -1) * (0.9 + Math.random() * 1.4);
   try {
-    await bot.look(newYaw, -0.2, true);
+    await bot.look(bot.entity.yaw + delta, -0.15 + Math.random() * 0.1, true);
   } catch {}
 
   bot.setControlState('forward', true);
   bot.setControlState('sprint', true);
   bot.setControlState('jump', true);
-  await sleep(400);
+  await sleep(320 + Math.floor(Math.random() * 180));
   bot.setControlState('jump', false);
-  await sleep(1200);
-  bot.setControlState('jump', true);
-  await sleep(300);
-  bot.setControlState('jump', false);
-  await sleep(800);
+  await sleep(900 + Math.floor(Math.random() * 400));
+  if (Math.random() < 0.6) {
+    bot.setControlState('jump', true);
+    await sleep(220);
+    bot.setControlState('jump', false);
+  }
+  await sleep(500 + Math.floor(Math.random() * 300));
   bot.clearControlStates();
-
-  // sobe 1 bloco se tiver degrau na frente
-  try {
-    const p = bot.entity.position.floored();
-    const yaw = bot.entity.yaw;
-    const dx = Math.round(-Math.sin(yaw));
-    const dz = Math.round(-Math.cos(yaw));
-    const step = bot.blockAt(p.offset(dx, 0, dz));
-    const stepUp = bot.blockAt(p.offset(dx, 1, dz));
-    if (step && step.boundingBox === 'block' && (!stepUp || stepUp.name === 'air')) {
-      bot.setControlState('forward', true);
-      bot.setControlState('jump', true);
-      await sleep(500);
-      bot.clearControlStates();
-    }
-  } catch {}
 
   return true;
 }
 
-/** Andar sem pathfinder (controles crus) — evita trava em Goal */
-async function walkRaw(bot, seconds = 2.5, yawOffset = 0) {
+async function walkRaw(bot, seconds = 2.4, yawOffset = 0) {
   try {
     const yaw = bot.entity.yaw + yawOffset;
     await bot.look(yaw, 0, true);
@@ -195,29 +198,32 @@ async function walkRaw(bot, seconds = 2.5, yawOffset = 0) {
   while (Date.now() < end) {
     if (blockInFace(bot)) {
       bot.setControlState('jump', true);
-      await sleep(200);
+      await sleep(180);
       bot.setControlState('jump', false);
-      // se ainda parede, dig
       const f = blockInFace(bot);
-      if (f && /dirt|grass|sand|gravel/.test(f.name)) {
+      if (f && SOFT_FACE.test(f.name)) {
         bot.clearControlStates();
         try {
-          await race(bot.dig(f, true), 4000);
+          await race(bot.dig(f, true), 3800);
         } catch {
-          try {
-            bot.stopDigging();
-          } catch {}
+          try { bot.stopDigging(); } catch {}
         }
         bot.setControlState('forward', true);
         bot.setControlState('sprint', true);
       }
     }
-    if (Math.random() < 0.15 && bot.entity.onGround) {
+    // human micro-variation
+    if (Math.random() < 0.12 && bot.entity.onGround) {
       bot.setControlState('jump', true);
-      await sleep(150);
+      await sleep(120 + Math.floor(Math.random() * 80));
       bot.setControlState('jump', false);
     }
-    await sleep(200);
+    if (Math.random() < 0.08) {
+      try {
+        await bot.look(bot.entity.yaw + (Math.random() - 0.5) * 0.4, 0, true);
+      } catch {}
+    }
+    await sleep(180 + Math.floor(Math.random() * 60));
   }
   bot.clearControlStates();
 }
@@ -225,20 +231,19 @@ async function walkRaw(bot, seconds = 2.5, yawOffset = 0) {
 async function gotoNear(bot, x, y, z, range = 2) {
   const start = bot.entity.position.clone();
   try {
-    await race(bot.pathfinder.goto(new pfGoals.GoalNear(x, y, z, range)), 10000);
+    await race(bot.pathfinder.goto(new pfGoals.GoalNear(x, y, z, range)), 9000);
     return true;
   } catch {
     await stopNav(bot);
-    // path falhou — anda na direção aproximada com controles
     const dx = x - bot.entity.position.x;
     const dz = z - bot.entity.position.z;
     const yaw = Math.atan2(-dx, -dz);
     try {
       await bot.look(yaw, 0, true);
     } catch {}
-    await walkRaw(bot, 2.5, 0);
+    await walkRaw(bot, 2.3, 0);
     const moved = bot.entity.position.distanceTo(start);
-    if (moved < 1.2) await forceUnstuck(bot);
+    if (moved < 1.1) await forceUnstuck(bot);
     return false;
   }
 }
@@ -251,10 +256,8 @@ async function doEat(bot) {
     if (typeof bot.consume === 'function') await bot.consume();
     else {
       bot.activateItem();
-      await sleep(1600);
-      try {
-        bot.deactivateItem();
-      } catch {}
+      await sleep(1500);
+      try { bot.deactivateItem(); } catch {}
     }
     console.log('[PURE] ate', food.name);
     return true;
@@ -270,7 +273,7 @@ async function doFight(bot, entity) {
     const sword = findItem(bot, /sword|_axe$/);
     if (sword) await bot.equip(sword, 'hand');
     bot.pvp.attack(entity);
-    await sleep(800);
+    await sleep(700 + Math.floor(Math.random() * 300));
     return true;
   } catch {
     return false;
@@ -282,9 +285,7 @@ async function digBlock(bot, block) {
   try {
     await stopNav(bot);
     if (bot.tool?.equipForBlock) {
-      try {
-        await bot.tool.equipForBlock(block);
-      } catch {}
+      try { await bot.tool.equipForBlock(block); } catch {}
     } else {
       const tool =
         findItem(bot, /_pickaxe/) ||
@@ -293,13 +294,11 @@ async function digBlock(bot, block) {
       if (tool) await bot.equip(tool, 'hand');
     }
     await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
-    await race(bot.dig(block, true), 10000);
+    await race(bot.dig(block, true), 9500);
     console.log('[PURE] dug', block.name);
     return true;
   } catch (e) {
-    try {
-      bot.stopDigging();
-    } catch {}
+    try { bot.stopDigging(); } catch {}
     return false;
   }
 }
@@ -309,16 +308,13 @@ async function doCollect(bot, block) {
   const start = bot.entity.position.clone();
   try {
     if (bot.pvp?.target) {
-      try {
-        await bot.pvp.stop();
-      } catch {}
+      try { await bot.pvp.stop(); } catch {}
     }
     await stopNav(bot);
 
-    // timeout CURTO — não ficar 25s olhando árvore inacessível
     if (bot.collectBlock?.collect) {
       try {
-        await race(bot.collectBlock.collect(block), 12000);
+        await race(bot.collectBlock.collect(block), 11000);
         console.log('[PURE] collectBlock', block.name);
         return true;
       } catch (e) {
@@ -327,20 +323,14 @@ async function doCollect(bot, block) {
       }
     }
 
-    const ok = await gotoNear(
-      bot,
-      block.position.x,
-      block.position.y,
-      block.position.z,
-      2
-    );
+    const ok = await gotoNear(bot, block.position.x, block.position.y, block.position.z, 2);
     const still = bot.blockAt(block.position);
     if (still && still.name === block.name) {
       const dug = await digBlock(bot, still);
       if (dug) return true;
     }
 
-    if (bot.entity.position.distanceTo(start) < 1.5) {
+    if (bot.entity.position.distanceTo(start) < 1.4) {
       await forceUnstuck(bot);
     }
     return false;
@@ -414,10 +404,7 @@ function getStage(bot) {
   const logs = countItem(bot, WOOD_LOG);
   const planks = countItem(bot, /_planks$/);
   const sticks = countItem(bot, /^stick$/);
-  const hasWoodPick = !!findItem(
-    bot,
-    /wooden_pickaxe|stone_pickaxe|iron_pickaxe|diamond_pickaxe/
-  );
+  const hasWoodPick = !!findItem(bot, /wooden_pickaxe|stone_pickaxe|iron_pickaxe|diamond_pickaxe/);
   const hasStonePick = !!findItem(bot, /stone_pickaxe|iron_pickaxe|diamond_pickaxe/);
   const cobble = countItem(bot, /cobblestone|cobbled_deepslate/);
   const hasTable =
@@ -436,6 +423,13 @@ function getStage(bot) {
 }
 
 async function runStage(bot, stage) {
+  // small chance to just wander even in early stages — keeps emergent feel
+  if (stage !== 'explore' && Math.random() < 0.08) {
+    console.log('[PURE] soft wander (emergent variance)');
+    await walkRaw(bot, 2.0 + Math.random(), (Math.random() - 0.5) * 1.8);
+    return true;
+  }
+
   console.log('[PURE] STAGE', stage, 'y=' + bot.entity.position.y.toFixed(0));
 
   switch (stage) {
@@ -448,21 +442,14 @@ async function runStage(bot, stage) {
         console.log('[PURE] target log', log.name);
         return await doCollect(bot, log);
       }
-      // sem árvore: anda com controles (não pathfinder eterno)
       console.log('[PURE] no log nearby — walkRaw search');
-      await walkRaw(bot, 3, (Math.random() - 0.5) * 1.5);
+      await walkRaw(bot, 2.8 + Math.random(), (Math.random() - 0.5) * 1.6);
       return true;
     }
     case 'planks': {
       for (const p of [
-        'oak_planks',
-        'birch_planks',
-        'spruce_planks',
-        'jungle_planks',
-        'acacia_planks',
-        'dark_oak_planks',
-        'mangrove_planks',
-        'cherry_planks',
+        'oak_planks', 'birch_planks', 'spruce_planks', 'jungle_planks',
+        'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks',
       ]) {
         if (await tryCraft(bot, p, 4)) return true;
       }
@@ -481,7 +468,7 @@ async function runStage(bot, stage) {
         maxDistance: 32,
       });
       if (stone) return await doCollect(bot, stone);
-      await walkRaw(bot, 2.5, (Math.random() - 0.5));
+      await walkRaw(bot, 2.4, (Math.random() - 0.5));
       return true;
     }
     case 'stone_pick':
@@ -492,7 +479,7 @@ async function runStage(bot, stage) {
       );
     case 'explore': {
       const hasPick = !!findItem(bot, /_pickaxe/);
-      if (hasPick) {
+      if (hasPick && Math.random() < 0.55) {
         const ore = bot.findBlock({
           matching: (b) =>
             b && /(iron|coal|copper|gold|diamond)_ore|deepslate_.*_ore/.test(b.name),
@@ -500,7 +487,7 @@ async function runStage(bot, stage) {
         });
         if (ore) return await doCollect(bot, ore);
       }
-      await walkRaw(bot, 3, (Math.random() - 0.5) * 2);
+      await walkRaw(bot, 2.6 + Math.random() * 1.2, (Math.random() - 0.5) * 2.2);
       return true;
     }
     default:
@@ -510,9 +497,9 @@ async function runStage(bot, stage) {
 
 async function tossJunk(bot) {
   const dirt = items(bot).find((i) => /^(dirt|grass_block|coarse_dirt)$/.test(i.name));
-  if (dirt && dirt.count > 16) {
+  if (dirt && dirt.count > 18) {
     try {
-      await bot.toss(dirt.type, null, Math.min(dirt.count - 16, 32));
+      await bot.toss(dirt.type, null, Math.min(dirt.count - 16, 28));
     } catch {}
   }
 }
@@ -529,7 +516,7 @@ export function startPureSurvival(agent) {
   let lastPos = null;
   let stillSince = Date.now();
   let lastDecision = 0;
-  const DECISION_MS = 900;
+  const DECISION_MS = 850; // slightly faster recovery loop, still not frantic
 
   async function runOnce() {
     if (busy) return;
@@ -540,8 +527,9 @@ export function startPureSurvival(agent) {
     }
 
     const pos = bot.entity.position;
-    if (lastPos && pos.distanceTo(lastPos) < 0.4) {
-      if (Date.now() - stillSince > 3500) {
+    if (lastPos && pos.distanceTo(lastPos) < 0.35) {
+      // 2.8s still → force recovery (was 3.5s)
+      if (Date.now() - stillSince > 2800) {
         busy = true;
         bot._dreamBusy = true;
         try {
@@ -579,9 +567,7 @@ export function startPureSurvival(agent) {
         return;
       }
       if (bot.pvp?.target) {
-        try {
-          await bot.pvp.stop();
-        } catch {}
+        try { await bot.pvp.stop(); } catch {}
       }
 
       await tossJunk(bot);
@@ -603,7 +589,7 @@ export function startPureSurvival(agent) {
   }, DECISION_MS);
 
   bot.once('end', () => clearInterval(timer));
-  setTimeout(() => runOnce().catch(() => {}), 1500);
+  setTimeout(() => runOnce().catch(() => {}), 1400);
 
   bot.on('chat', (username, message) => {
     if (username === bot.username) return;
@@ -612,9 +598,7 @@ export function startPureSurvival(agent) {
       .toLowerCase();
     if (m === 'pare' || m === 'stop') {
       stopNav(bot);
-      try {
-        bot.pvp?.stop?.();
-      } catch {}
+      try { bot.pvp?.stop?.(); } catch {}
       busy = false;
       bot._dreamBusy = false;
     }
@@ -628,5 +612,5 @@ export function startPureSurvival(agent) {
     }
   });
 
-  console.log('[PURE] v6 ON — anti-freeze walk + dig face wall | stages');
+  console.log('[PURE] v7 ON — stable recovery + emergent variance');
 }

@@ -1,2 +1,2 @@
-DREAMBOT_BUILD=2026-08-20-PURE-v6-anti-freeze
-FIX=if still 3.5s dig face wall + turn + walkRaw (no 40s stare at dirt)
+DREAMBOT_BUILD=2026-08-20-PURE-v7-stable-emergent
+FIX=2.8s still → forceUnstuck + dig face soft + escapeHole when trapped | variance kept | no rigid stage lock
