@@ -1,7 +1,5 @@
 /**
- * MINDCRAFT SKILLS — real ports from mindcraft-bots/mindcraft skills.js
- * collectBlock, breakBlockAt, goToPosition, craftRecipe, placeBlock, pickup, unstuck
- * Used by mindcraft-core and path systems — NOT noops.
+ * MINDCRAFT SKILLS — fast dig + cave escape
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -27,17 +25,28 @@ async function race(p, ms) {
 
 export async function goToPosition(bot, x, y, z, minDist = 2) {
   if (!bot?.entity) return false;
+  const dist = bot.entity.position.distanceTo(new Vec3(x, y, z));
+  // close enough: sprint walk, no pathfinder delay
+  if (dist < 12) {
+    try {
+      await bot.lookAt(new Vec3(x, y + 1, z), true);
+      bot.setControlState('forward', true);
+      bot.setControlState('sprint', true);
+      await sleep(Math.min(1500, dist * 100));
+      bot.clearControlStates();
+      return true;
+    } catch {}
+  }
   try {
     const { goals, Movements } = require('mineflayer-pathfinder');
     const mcData = require('minecraft-data')(bot.version);
     if (!bot.pathfinder) return false;
     const mov = new Movements(bot, mcData);
-    // Mindcraft: path can dig carefully for progress, not spam
     mov.canDig = true;
-    mov.digCost = 8;
-    mov.placeCost = 4;
+    mov.digCost = 3;
+    mov.placeCost = 2;
     bot.pathfinder.setMovements(mov);
-    await race(bot.pathfinder.goto(new goals.GoalNear(x, y, z, minDist)), 30000);
+    await race(bot.pathfinder.goto(new goals.GoalNear(x, y, z, minDist)), 15000);
     return true;
   } catch (e) {
     console.warn('[SKILL] goTo', (e.message || '').slice(0, 40));
@@ -55,18 +64,12 @@ export async function breakBlockAt(bot, x, y, z) {
   }
 
   try {
-    if (bot.tool?.equipForBlock) {
-      await bot.tool.equipForBlock(block, { requireHarvest: false });
-    }
-  } catch {}
-
-  try {
     const { digBlock } = await import('./dig-place.js');
-    return await digBlock(bot, block, { maxMs: 20000, retries: 4 });
+    return await digBlock(bot, block, { retries: 2 });
   } catch {
     try {
-      await race(bot.dig(block, true), 18000);
-      console.log('[SKILL] breakBlockAt', block.name);
+      if (bot.tool?.equipForBlock) await bot.tool.equipForBlock(block, { requireHarvest: false });
+      await race(bot.dig(block, true), 8000);
       return true;
     } catch {
       try {
@@ -86,7 +89,6 @@ export async function collectBlock(bot, blockType, num = 1) {
   }
   if (blockType.endsWith('_ore')) types.push('deepslate_' + blockType);
   if (blockType === 'cobblestone') types.push('stone', 'deepslate');
-  if (blockType === 'dirt') types.push('grass_block');
   if (blockType === 'log' || blockType === 'wood') {
     types = [
       'oak_log', 'birch_log', 'spruce_log', 'jungle_log',
@@ -100,33 +102,23 @@ export async function collectBlock(bot, blockType, num = 1) {
 
     const block = bot.findBlock({
       matching: (b) => b && types.includes(b.name),
-      maxDistance: 48,
+      maxDistance: 32,
     });
-    if (!block) {
-      if (collected === 0) console.log('[SKILL] no', blockType, 'nearby');
-      break;
-    }
+    if (!block) break;
 
-    try {
-      if (bot.tool?.equipForBlock) {
-        await bot.tool.equipForBlock(block, { requireHarvest: false });
-      }
-    } catch {}
-
-    try {
-      if (bot.collectBlock?.collect) {
-        await race(bot.collectBlock.collect(block, { ignoreNoPath: true }), 45000);
+    // Prefer collectBlock plugin only if close (avoid 45s path)
+    const d = bot.entity.position.distanceTo(block.position);
+    if (d < 6 && bot.collectBlock?.collect) {
+      try {
+        await race(bot.collectBlock.collect(block, { ignoreNoPath: true }), 12000);
         collected++;
-        console.log('[SKILL] collectBlock', block.name);
+        console.log('[SKILL] collect', block.name);
         continue;
-      }
-    } catch (e) {
-      console.warn('[SKILL] collectBlock plugin', (e.message || '').slice(0, 40));
+      } catch {}
     }
 
     await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
-    const ok = await breakBlockAt(bot, block.position.x, block.position.y, block.position.z);
-    if (ok) {
+    if (await breakBlockAt(bot, block.position.x, block.position.y, block.position.z)) {
       collected++;
       await pickupNearbyItems(bot);
     }
@@ -138,15 +130,18 @@ export async function collectBlock(bot, blockType, num = 1) {
 export async function pickupNearbyItems(bot) {
   const getNear = () =>
     bot.nearestEntity(
-      (e) => e.name === 'item' && bot.entity.position.distanceTo(e.position) < 10
+      (e) => e.name === 'item' && bot.entity.position.distanceTo(e.position) < 8
     );
   let item = getNear();
   let n = 0;
-  while (item && n < 8) {
+  while (item && n < 6) {
     try {
-      await goToPosition(bot, item.position.x, item.position.y, item.position.z, 1);
+      await bot.lookAt(item.position, true);
+      bot.setControlState('forward', true);
+      await sleep(300);
+      bot.clearControlStates();
     } catch {}
-    await sleep(250);
+    await sleep(100);
     const prev = item;
     item = getNear();
     if (prev === item) break;
@@ -159,16 +154,11 @@ export async function craftRecipe(bot, itemName, num = 1) {
   try {
     const mcData = require('minecraft-data')(bot.version);
     const item = mcData.itemsByName[itemName];
-    if (!item) {
-      console.log('[SKILL] unknown item', itemName);
-      return false;
-    }
-
+    if (!item) return false;
     let table = bot.findBlock({
       matching: mcData.blocksByName.crafting_table?.id,
       maxDistance: 16,
     });
-
     let recipes = bot.recipesFor(item.id, null, 1, null);
     if ((!recipes || !recipes.length) && table) {
       if (bot.entity.position.distanceTo(table.position) > 4) {
@@ -176,19 +166,10 @@ export async function craftRecipe(bot, itemName, num = 1) {
       }
       recipes = bot.recipesFor(item.id, null, 1, table);
     }
-    if (!recipes || !recipes.length) {
-      recipes = bot.recipesFor(item.id, null, 1, true);
-    }
-    if (!recipes || !recipes.length) {
-      console.log('[SKILL] no recipe', itemName);
-      return false;
-    }
-
-    await race(bot.craft(recipes[0], num, table || null), 15000);
-    console.log('[SKILL] craft', itemName, 'x' + num);
-    try {
-      bot.armorManager?.equipAll?.();
-    } catch {}
+    if (!recipes || !recipes.length) recipes = bot.recipesFor(item.id, null, 1, true);
+    if (!recipes || !recipes.length) return false;
+    await race(bot.craft(recipes[0], num, table || null), 10000);
+    console.log('[SKILL] craft', itemName);
     return true;
   } catch (e) {
     console.warn('[SKILL] craft', itemName, (e.message || '').slice(0, 40));
@@ -198,29 +179,20 @@ export async function craftRecipe(bot, itemName, num = 1) {
 
 export async function placeBlock(bot, blockType, x, y, z) {
   const target = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
-  let itemName = blockType;
-  if (itemName === 'redstone_wire') itemName = 'redstone';
-
-  const item = bot.inventory.findInventoryItem(itemName);
-  if (!item) {
-    console.log('[SKILL] no item to place', itemName);
-    return false;
-  }
-
-  const empty = ['air', 'water', 'lava', 'grass', 'short_grass', 'tall_grass', 'snow', 'dead_bush', 'fern', 'cave_air', 'void_air'];
+  const item = bot.inventory.findInventoryItem(blockType);
+  if (!item) return false;
+  const empty = ['air', 'water', 'lava', 'grass', 'short_grass', 'tall_grass', 'snow', 'cave_air', 'void_air'];
   const at = bot.blockAt(target);
   if (at && !empty.includes(at.name)) {
     await breakBlockAt(bot, target.x, target.y, target.z);
-    await sleep(200);
   }
-
   const dirs = [
     new Vec3(0, -1, 0),
-    new Vec3(0, 1, 0),
     new Vec3(1, 0, 0),
     new Vec3(-1, 0, 0),
     new Vec3(0, 0, 1),
     new Vec3(0, 0, -1),
+    new Vec3(0, 1, 0),
   ];
   let buildOff = null;
   let face = null;
@@ -232,59 +204,93 @@ export async function placeBlock(bot, blockType, x, y, z) {
       break;
     }
   }
-  if (!buildOff) {
-    console.log('[SKILL] nothing to place on');
-    return false;
-  }
-
+  if (!buildOff) return false;
   if (bot.entity.position.distanceTo(target) > 4.5) {
     await goToPosition(bot, target.x, target.y, target.z, 3);
   }
-
   try {
     await bot.equip(item, 'hand');
     await bot.lookAt(buildOff.position.offset(0.5, 0.5, 0.5), true);
-    await race(bot.placeBlock(buildOff, face), 3000);
-    console.log('[SKILL] place', blockType, 'at', target);
+    await race(bot.placeBlock(buildOff, face), 2000);
     return true;
-  } catch (e) {
-    console.warn('[SKILL] place fail', (e.message || '').slice(0, 40));
+  } catch {
     return false;
   }
 }
 
-/** Mindcraft-style unstuck: only when truly boxed in */
+/** Dig vertical shaft UP until open sky / high y */
+export async function escapeCave(bot) {
+  if (!bot?.entity) return false;
+  const startY = bot.entity.position.y;
+  if (startY >= 62) return false;
+  console.log('[SKILL] ESCAPE CAVE from y=' + startY.toFixed(0));
+
+  for (let step = 0; step < 40 && bot.entity.position.y < 64; step++) {
+    if (bot._dreamPvpActive) break;
+    const pf = bot.entity.position.floored();
+
+    // clear head + above
+    for (const dy of [1, 2]) {
+      const b = bot.blockAt(pf.offset(0, dy, 0));
+      if (b && b.boundingBox === 'block' && !/bedrock|barrier/.test(b.name)) {
+        await breakBlockAt(bot, b.position.x, b.position.y, b.position.z);
+      }
+    }
+
+    // pillar if needed
+    try {
+      const { placeUnderFeet } = await import('./dig-place.js');
+      await placeUnderFeet(bot);
+    } catch {}
+
+    bot.setControlState('jump', true);
+    await sleep(200);
+    bot.setControlState('jump', false);
+    await sleep(100);
+
+    // if still stuck sideways, open one wall
+    if (step % 5 === 4) {
+      const yaw = bot.entity.yaw;
+      const fx = Math.round(-Math.sin(yaw)) || 1;
+      const fz = Math.round(-Math.cos(yaw));
+      const wall = bot.blockAt(pf.offset(fx, 1, fz));
+      if (wall && wall.boundingBox === 'block' && !/bedrock|barrier/.test(wall.name)) {
+        await breakBlockAt(bot, wall.position.x, wall.position.y, wall.position.z);
+      }
+    }
+  }
+
+  console.log('[SKILL] escape done y=' + bot.entity.position.y.toFixed(0));
+  return bot.entity.position.y > startY + 2;
+}
+
 export async function unstuck(bot) {
   if (!bot?.entity || bot._digLocked || bot._dreamPvpActive) return false;
+
+  // if underground long, prefer full cave escape
+  if (bot.entity.position.y < 50) {
+    return escapeCave(bot);
+  }
+
   const pf = bot.entity.position.floored();
   let walls = 0;
-  const dirs = [
+  for (const [dx, dz] of [
     [1, 0],
     [-1, 0],
     [0, 1],
     [0, -1],
-  ];
-  for (const [dx, dz] of dirs) {
+  ]) {
     const b = bot.blockAt(pf.offset(dx, 0, dz));
     if (b && b.boundingBox === 'block') walls++;
   }
   const head = bot.blockAt(pf.offset(0, 1, 0));
   const headBlocked = head && head.boundingBox === 'block';
+  if (walls < 2 && !headBlocked) return false;
 
-  if (walls < 3 && !headBlocked) return false;
-
-  console.log('[SKILL] unstuck walls=' + walls + ' head=' + headBlocked);
-
-  // 1) dig ceiling first (Mindcraft escape)
+  console.log('[SKILL] unstuck walls=' + walls);
   if (headBlocked && head && !/bedrock|barrier/.test(head.name)) {
     await breakBlockAt(bot, head.position.x, head.position.y, head.position.z);
   }
-  const above = bot.blockAt(pf.offset(0, 2, 0));
-  if (above && above.boundingBox === 'block' && !/bedrock|barrier/.test(above.name)) {
-    await breakBlockAt(bot, above.position.x, above.position.y, above.position.z);
-  }
-
-  // 2) dig one forward wall only
   const yaw = bot.entity.yaw;
   const fx = Math.round(-Math.sin(yaw)) || 1;
   const fz = Math.round(-Math.cos(yaw));
@@ -294,26 +300,23 @@ export async function unstuck(bot) {
       await breakBlockAt(bot, b.position.x, b.position.y, b.position.z);
     }
   }
-
   bot.setControlState('forward', true);
   bot.setControlState('jump', true);
   bot.setControlState('sprint', true);
-  await sleep(800);
+  await sleep(600);
   bot.clearControlStates();
   return true;
 }
 
 export async function moveAway(bot, dist = 8) {
-  const yaw = bot.entity.yaw + Math.PI;
-  bot.look(yaw, 0, true);
+  bot.look(bot.entity.yaw + Math.PI, 0, true);
   bot.setControlState('forward', true);
   bot.setControlState('sprint', true);
-  await sleep(Math.min(dist * 200, 3000));
+  await sleep(Math.min(dist * 150, 2500));
   bot.clearControlStates();
   return true;
 }
 
-/** Background unstuck watcher — real, not noop */
 export function startMindcraftUnstuck(agent) {
   const bot = agent?.bot;
   if (!bot || bot._mcUnstuck) return;
@@ -321,11 +324,15 @@ export function startMindcraftUnstuck(agent) {
 
   let lastPos = null;
   let still = 0;
+  let undergroundTicks = 0;
   let running = false;
 
   setInterval(async () => {
     if (running || !bot.entity) return;
-    if (bot._digLocked || bot._dreamPvpActive || bot._mcCoreBusy) return;
+    if (bot._digLocked || bot._dreamPvpActive) return;
+
+    if (bot.entity.position.y < 55) undergroundTicks++;
+    else undergroundTicks = 0;
 
     const key =
       Math.floor(bot.entity.position.x) +
@@ -339,24 +346,26 @@ export function startMindcraftUnstuck(agent) {
       lastPos = key;
     }
 
-    if (still < 5) return;
-    running = true;
-    try {
-      console.log('[SKILL] still=' + still + ' → unstuck');
-      await unstuck(bot);
-      still = 0;
-    } catch (e) {
-      console.warn('[SKILL] unstuck', (e.message || '').slice(0, 40));
-    } finally {
-      running = false;
+    // force escape if underground ~60s (24 * 2.5s) or still 4 ticks
+    if (undergroundTicks >= 20 || still >= 4) {
+      running = true;
+      try {
+        console.log('[SKILL] force escape still=' + still + ' under=' + undergroundTicks);
+        await escapeCave(bot);
+        still = 0;
+        undergroundTicks = 0;
+      } catch (e) {
+        console.warn('[SKILL] escape', (e.message || '').slice(0, 40));
+      } finally {
+        running = false;
+      }
     }
   }, 2500);
 
-  console.log('[SKILL] Mindcraft unstuck ON');
+  console.log('[SKILL] unstuck + cave escape ON');
 }
 
 export function startMindcraftSkills(agent) {
-  // expose helpers on bot for other modules
   const bot = agent?.bot;
   if (!bot || bot._mcSkills) return;
   bot._mcSkills = true;
@@ -368,7 +377,8 @@ export function startMindcraftSkills(agent) {
     placeBlock: (t, x, y, z) => placeBlock(bot, t, x, y, z),
     pickupNearbyItems: () => pickupNearbyItems(bot),
     unstuck: () => unstuck(bot),
+    escapeCave: () => escapeCave(bot),
   };
   startMindcraftUnstuck(agent);
-  console.log('[SKILL] Mindcraft skills API ON');
+  console.log('[SKILL] Mindcraft skills FAST ON');
 }
