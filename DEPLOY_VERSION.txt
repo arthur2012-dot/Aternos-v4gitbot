@@ -1,2 +1,2 @@
-DREAMBOT_BUILD=2026-08-20-FULL-MINDCRAFT-SYNC
-FIX=fetch-base copies entire mindcraft (src, profiles, tasks, bots, patches, services) then applies DreamBot overlays
+DREAMBOT_BUILD=2026-08-20-MINDCRAFT-VENDORED-PARTIAL
+FIX=vendoring full mindcraft into repo - core files landing
