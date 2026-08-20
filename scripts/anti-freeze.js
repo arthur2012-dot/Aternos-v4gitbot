@@ -1,5 +1,5 @@
 /**
- * Unstuck via pathfinder/ash goto only — no custom dig war
+ * Unstuck via pathfinder only — NEVER interrupts dig lock / active dig.
  */
 export function startAntiFreeze(agent) {
   const bot = agent.bot;
@@ -12,11 +12,16 @@ export function startAntiFreeze(agent) {
   setInterval(async () => {
     try {
       if (!bot.entity || bot._dreamPvpActive) return;
+      // respect dig lock + active dig + nav tree busy
+      if (bot._digLocked || bot.targetDigBlock) {
+        still = 0;
+        return;
+      }
       if (agent.actions?.executing) {
         still = 0;
         return;
       }
-      if (bot.pathfinder?.isMoving?.()) {
+      if (bot.pathfinder?.isMoving?.() || bot._navBusy) {
         still = 0;
         return;
       }
@@ -34,20 +39,20 @@ export function startAntiFreeze(agent) {
       lx = x;
       lz = z;
 
-      if (still < 8) return; // ~12s
+      if (still < 10) return; // ~15s — less aggressive
       still = 0;
-      console.log('[ANTI-FREEZE] pathfinder unstuck');
 
-      const yaw = bot.entity.yaw + Math.PI;
-      const tx = x - Math.sin(yaw) * 5;
-      const tz = z - Math.cos(yaw) * 5;
-      if (typeof bot.dreamGoto === 'function') {
-        await bot.dreamGoto(tx, bot.entity.position.y, tz, 1);
-      }
+      // walk FORWARD in current facing — no reverse spin
+      console.log('[ANTI-FREEZE] nudge forward (no spin)');
+      bot.setControlState('forward', true);
+      bot.setControlState('sprint', true);
+      bot.setControlState('jump', true);
+      await new Promise((r) => setTimeout(r, 600));
+      bot.clearControlStates();
     } catch (e) {
       console.warn('[ANTI-FREEZE]', e.message);
     }
   }, 1500);
 
-  console.log('[ANTI-FREEZE] pathfinder-only unstuck');
+  console.log('[ANTI-FREEZE] dig-lock aware, no reverse turn');
 }
