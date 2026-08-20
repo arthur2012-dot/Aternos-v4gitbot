@@ -15,31 +15,53 @@ function copy(from, to) {
   console.log('[post-wire] copied', to);
 }
 
+// Keep essentials only
+copy('scripts/dig-place.js', 'src/agent/dig-place.js');
+copy('scripts/mindcraft-core.js', 'src/agent/mindcraft-core.js');
 copy('scripts/pvp-combat.js', 'src/agent/pvp-combat.js');
-copy('scripts/passive-skills.js', 'src/agent/passive-skills.js');
-copy('scripts/escape-hole.js', 'src/agent/escape-hole.js');
-copy('scripts/autobot-skills.js', 'src/agent/autobot-skills.js');
-copy('scripts/house-builder.js', 'src/agent/house-builder.js');
-copy('scripts/danger-detect.js', 'src/agent/danger-detect.js');
-copy('scripts/env-navigation.js', 'src/agent/env-navigation.js');
+copy('scripts/multiplayer-social.js', 'src/agent/multiplayer-social.js');
 copy('scripts/kill-chat.js', 'src/agent/kill-chat.js');
 copy('scripts/groq-heartbeat.js', 'src/agent/groq-heartbeat.js');
-copy('scripts/nav-stack.js', 'src/agent/nav-stack.js');
-copy('scripts/baritone-nav.js', 'src/agent/baritone-nav.js');
-copy('scripts/anti-freeze.js', 'src/agent/anti-freeze.js');
-copy('scripts/task-guard.js', 'src/agent/task-guard.js');
-copy('scripts/dig-place.js', 'src/agent/dig-place.js');
-copy('scripts/koneko-behaviors.js', 'src/agent/koneko-behaviors.js');
 copy('scripts/mobile-viewer.js', 'src/agent/mobile-viewer.js');
-copy('scripts/nav-tree.js', 'src/agent/nav-tree.js');
-copy('scripts/voyager-skills.js', 'src/agent/voyager-skills.js');
-copy('scripts/multiplayer-social.js', 'src/agent/multiplayer-social.js');
+
+// Neutralize bad systems so old FULL STACK cannot start them effectively
+function writeNoop(name, exportName) {
+  const dst = join(ROOT, 'src/agent', name);
+  mkdirSync(dirname(dst), { recursive: true });
+  writeFileSync(
+    dst,
+    `/** DISABLED — was causing random dig / conflicts. Replaced by mindcraft-core. */\nexport function ${exportName}() { console.log('[DISABLED] ${name}'); }\nexport default { ${exportName} };\n`
+  );
+  console.log('[post-wire] noop', name);
+}
+
+writeNoop('nav-tree.js', 'startNavTree');
+writeNoop('nav-stack.js', 'startNavStack');
+writeNoop('baritone-nav.js', 'startBaritoneNav');
+writeNoop('env-navigation.js', 'startEnvNavigation');
+writeNoop('anti-freeze.js', 'startAntiFreeze');
+writeNoop('koneko-behaviors.js', 'startKonekoBehaviors');
+writeNoop('passive-skills.js', 'startPassiveSkills');
+writeNoop('autobot-skills.js', 'startAutobotSkills');
+writeNoop('danger-detect.js', 'startDangerDetect');
+writeNoop('task-guard.js', 'startTaskGuard');
+writeNoop('escape-hole.js', 'startEscapeHole');
+writeNoop('voyager-skills.js', 'startVoyagerCurriculum');
+// also export alias
+try {
+  const p = join(ROOT, 'src/agent/voyager-skills.js');
+  writeFileSync(
+    p,
+    `/** DISABLED — curriculum moved into mindcraft-core */\nexport function startVoyagerCurriculum() { console.log('[DISABLED] voyager'); }\nexport function startVoyagerSkills() { console.log('[DISABLED] voyager'); }\n`
+  );
+} catch {}
 
 const agentPath = join(ROOT, 'src/agent/agent.js');
 if (!existsSync(agentPath)) process.exit(0);
 
 let agent = readFileSync(agentPath, 'utf8');
 
+// Chat spam filter
 if (!agent.includes('[DreamBot] suppressed') && agent.includes('async openChat')) {
   agent = agent.replace(
     /async openChat\(message\) \{/,
@@ -62,46 +84,22 @@ agent = agent.replace(
   '/* no random anti-AFK */'
 );
 
-if (!agent.includes('[DreamBot] FULL STACK')) {
+// Inject CLEAN stack once
+if (!agent.includes('[DreamBot] CLEAN STACK')) {
   const block = `
-            // [DreamBot] FULL STACK
+            // [DreamBot] CLEAN STACK — Mindcraft core only (viewer untouched)
             try {
-                const { startPassiveSkills } = await import('./passive-skills.js');
-                startPassiveSkills(this);
-            } catch (e) { console.warn('[DreamBot] passive', e.message); }
-            try {
-                const { startVoyagerCurriculum } = await import('./voyager-skills.js');
-                startVoyagerCurriculum(this);
-            } catch (e) { console.warn('[DreamBot] curriculum', e.message); }
-            try {
-                const { startMultiplayerSocial } = await import('./multiplayer-social.js');
-                startMultiplayerSocial(this);
-            } catch (e) { console.warn('[DreamBot] mp', e.message); }
-            try {
-                const { startNavStack } = await import('./nav-stack.js');
-                await startNavStack(this);
-            } catch (e) {
-                try {
-                    const { startBaritoneNav } = await import('./baritone-nav.js');
-                    await startBaritoneNav(this);
-                } catch (e2) { console.warn('[DreamBot] nav', e2.message); }
-            }
-            try {
-                const { startNavTree } = await import('./nav-tree.js');
-                startNavTree(this);
-            } catch (e) { console.warn('[DreamBot] navtree', e.message); }
+                const { startMindcraftCore } = await import('./mindcraft-core.js');
+                startMindcraftCore(this);
+            } catch (e) { console.warn('[DreamBot] mc-core', e.message); }
             try {
                 const { startPvpCombat } = await import('./pvp-combat.js');
                 startPvpCombat(this);
             } catch (e) { console.warn('[DreamBot] pvp', e.message); }
             try {
-                const { startDangerDetect } = await import('./danger-detect.js');
-                startDangerDetect(this);
-            } catch (e) { console.warn('[DreamBot] danger', e.message); }
-            try {
-                const { startEnvNavigation } = await import('./env-navigation.js');
-                startEnvNavigation(this);
-            } catch (e) { console.warn('[DreamBot] env-nav', e.message); }
+                const { startMultiplayerSocial } = await import('./multiplayer-social.js');
+                startMultiplayerSocial(this);
+            } catch (e) { console.warn('[DreamBot] mp', e.message); }
             try {
                 const { startKillChat } = await import('./kill-chat.js');
                 startKillChat(this);
@@ -110,18 +108,6 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
                 const { startGroqHeartbeat } = await import('./groq-heartbeat.js');
                 startGroqHeartbeat(this);
             } catch (e) { console.warn('[DreamBot] groq-hb', e.message); }
-            try {
-                const { startKonekoBehaviors } = await import('./koneko-behaviors.js');
-                await startKonekoBehaviors(this);
-            } catch (e) { console.warn('[DreamBot] koneko', e.message); }
-            try {
-                const { startAntiFreeze } = await import('./anti-freeze.js');
-                startAntiFreeze(this);
-            } catch (e) { console.warn('[DreamBot] anti-freeze', e.message); }
-            try {
-                const { startTaskGuard } = await import('./task-guard.js');
-                startTaskGuard(this);
-            } catch (e) { console.warn('[DreamBot] task-guard', e.message); }
             try {
                 const { startMobileViewer } = await import('./mobile-viewer.js');
                 await startMobileViewer(this.bot);
@@ -135,100 +121,18 @@ if (!agent.includes('[DreamBot] FULL STACK')) {
   }
 }
 
-if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startVoyagerCurriculum')) {
+// If old FULL STACK exists, still ensure mindcraft-core starts
+if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startMindcraftCore')) {
   agent = agent.replace(
-    /startPassiveSkills\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] passive', e\.message\); \}/,
-    `startPassiveSkills(this);
-            } catch (e) { console.warn('[DreamBot] passive', e.message); }
+    /\/\/ \[DreamBot\] FULL STACK/,
+    `// [DreamBot] FULL STACK (legacy — noops disable junk)
             try {
-                const { startVoyagerCurriculum } = await import('./voyager-skills.js');
-                startVoyagerCurriculum(this);
-            } catch (e) { console.warn('[DreamBot] curriculum', e.message); }`
-  );
-}
-
-if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startMultiplayerSocial')) {
-  agent = agent.replace(
-    /startVoyagerCurriculum\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] curriculum', e\.message\); \}/,
-    `startVoyagerCurriculum(this);
-            } catch (e) { console.warn('[DreamBot] curriculum', e.message); }
-            try {
-                const { startMultiplayerSocial } = await import('./multiplayer-social.js');
-                startMultiplayerSocial(this);
-            } catch (e) { console.warn('[DreamBot] mp', e.message); }`
-  );
-  // fallback after pvp
-  if (!agent.includes('startMultiplayerSocial')) {
-    agent = agent.replace(
-      /startPvpCombat\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] pvp', e\.message\); \}/,
-      `startPvpCombat(this);
-            } catch (e) { console.warn('[DreamBot] pvp', e.message); }
-            try {
-                const { startMultiplayerSocial } = await import('./multiplayer-social.js');
-                startMultiplayerSocial(this);
-            } catch (e) { console.warn('[DreamBot] mp', e.message); }`
-    );
-  }
-}
-
-if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startNavTree')) {
-  agent = agent.replace(
-    /startPvpCombat\(this\);/,
-    `try {
-                const { startNavTree } = await import('./nav-tree.js');
-                startNavTree(this);
-            } catch (e) { console.warn('[DreamBot] navtree', e.message); }
-            startPvpCombat(this);`
-  );
-}
-
-if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startDangerDetect')) {
-  agent = agent.replace(
-    /startPvpCombat\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] pvp', e\.message\); \}/,
-    `startPvpCombat(this);
-            } catch (e) { console.warn('[DreamBot] pvp', e.message); }
-            try {
-                const { startDangerDetect } = await import('./danger-detect.js');
-                startDangerDetect(this);
-            } catch (e) { console.warn('[DreamBot] danger', e.message); }`
-  );
-}
-
-if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startEnvNavigation')) {
-  agent = agent.replace(
-    /startDangerDetect\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] danger', e\.message\); \}/,
-    `startDangerDetect(this);
-            } catch (e) { console.warn('[DreamBot] danger', e.message); }
-            try {
-                const { startEnvNavigation } = await import('./env-navigation.js');
-                startEnvNavigation(this);
-            } catch (e) { console.warn('[DreamBot] env-nav', e.message); }`
-  );
-}
-
-if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startKillChat')) {
-  agent = agent.replace(
-    /startEnvNavigation\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] env-nav', e\.message\); \}/,
-    `startEnvNavigation(this);
-            } catch (e) { console.warn('[DreamBot] env-nav', e.message); }
-            try {
-                const { startKillChat } = await import('./kill-chat.js');
-                startKillChat(this);
-            } catch (e) { console.warn('[DreamBot] killchat', e.message); }`
-  );
-}
-
-if (agent.includes('[DreamBot] FULL STACK') && !agent.includes('startGroqHeartbeat')) {
-  agent = agent.replace(
-    /startKillChat\(this\);\s*\} catch \(e\) \{ console\.warn\('\[DreamBot\] killchat', e\.message\); \}/,
-    `startKillChat(this);
-            } catch (e) { console.warn('[DreamBot] killchat', e.message); }
-            try {
-                const { startGroqHeartbeat } = await import('./groq-heartbeat.js');
-                startGroqHeartbeat(this);
-            } catch (e) { console.warn('[DreamBot] groq-hb', e.message); }`
+                const { startMindcraftCore } = await import('./mindcraft-core.js');
+                startMindcraftCore(this);
+            } catch (e) { console.warn('[DreamBot] mc-core', e.message); }
+            // [DreamBot] CLEAN note`
   );
 }
 
 writeFileSync(agentPath, agent);
-console.log('[post-wire] full stack + curriculum + multiplayer + nav-tree');
+console.log('[post-wire] CLEAN STACK — mindcraft-core + pvp + social + viewer');
