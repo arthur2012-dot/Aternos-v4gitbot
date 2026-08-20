@@ -1,166 +1,256 @@
 /**
- * Real dig + place + bridge helpers used by passive / unstuck.
+ * DIG + PLACE — continuous HOLD dig (not single click), best tool, place/bridge.
+ * Patterns from mineflayer-collectblock + mineflayer-tool.
  */
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const { Vec3 } = require('vec3');
+const Vec3 = require('vec3').Vec3;
 
-const BUILD_RE = /dirt|cobblestone|netherrack|planks|stone$|andesite|granite|diorite|tuff|deepslate|sand/;
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function race(p, ms) {
   let t;
   try {
-    return await Promise.race([
-      p,
-      new Promise((_, j) => {
-        t = setTimeout(() => j(new Error('t')), ms);
-      }),
-    ]);
-  } finally {
-    if (t) clearTimeout(t);
-  }
+    return await Promise.race([p, new Promise((_, j) => { t = setTimeout(() => j(new Error('timeout')), ms); })]);
+  } finally { if (t) clearTimeout(t); }
 }
 
-export function scaffoldItem(bot) {
-  try {
-    return bot.inventory.items().find((i) => BUILD_RE.test(i.name));
-  } catch {
-    return null;
-  }
+function isUnbreakable(name) {
+  return /bedrock|barrier|command_block|end_portal|end_gateway|structure|reinforced/.test(name || '');
 }
 
-export async function digBlock(bot, block) {
-  if (!bot?.entity || !block) return false;
-  if (/bedrock|barrier|command|end_portal|reinforced/.test(block.name || '')) return false;
-  try {
-    const items = bot.inventory.items();
-    const n = block.name || '';
-    let tool = null;
-    if (/_log$|planks|leaves/.test(n)) tool = items.find((i) => /_axe$/.test(i.name));
-    else if (/dirt|sand|gravel|grass|clay|mud|snow/.test(n))
-      tool = items.find((i) => /_shovel$/.test(i.name));
-    else tool = items.find((i) => /_pickaxe$/.test(i.name));
-    if (tool) {
-      try {
-        await bot.equip(tool, 'hand');
-      } catch {}
-    }
-    await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
-    await race(bot.dig(block), 9000);
-    return true;
-  } catch {
+export function bestToolFor(bot, block) {
+  if (!bot || !block) return null;
+  const inv = bot.inventory.items();
+  let best = null;
+  let bestTime = Infinity;
+  for (const tool of inv) {
     try {
-      bot.stopDigging();
-    } catch {}
+      const t = block.digTime(tool.type, false, false, false, [], bot.entity?.effects);
+      if (t < bestTime) { bestTime = t; best = tool; }
+    } catch {
+      const n = block.name || '';
+      if (/_log$|planks|leaves|bamboo/.test(n) && /_axe$/.test(tool.name)) best = best || tool;
+      else if (/dirt|sand|gravel|grass|clay|mud|snow/.test(n) && /_shovel$/.test(tool.name)) best = best || tool;
+      else if (/_pickaxe$/.test(tool.name)) best = best || tool;
+    }
+  }
+  return best;
+}
+
+export async function equipBestTool(bot, block) {
+  if (!bot || !block) return false;
+  try {
+    if (bot.tool?.equipForBlock) {
+      await bot.tool.equipForBlock(block, { requireHarvest: false });
+      return true;
+    }
+  } catch {}
+  const tool = bestToolFor(bot, block);
+  if (tool) {
+    try { await bot.equip(tool, 'hand'); return true; } catch {}
+  }
+  return false;
+}
+
+/** Continuous dig until block is gone (HOLD up to 3 attempts). */
+export async function digBlock(bot, block, opts = {}) {
+  if (!bot?.entity || !block) return false;
+  if (isUnbreakable(block.name)) return false;
+  const maxMs = opts.maxMs || 16000;
+  const retries = opts.retries ?? 3;
+
+  try {
+    try { bot.pathfinder?.setGoal?.(null); } catch {}
+    try { bot.pathfinder?.stop?.(); } catch {}
+    bot.clearControlStates();
+
+    await equipBestTool(bot, block);
+
+    for (let attempt = 0; attempt < retries; attempt++) {
+      const live = bot.blockAt(block.position);
+      if (!live || live.name === 'air' || live.name === 'cave_air' || live.type === 0) return true;
+      if (isUnbreakable(live.name)) return false;
+
+      try { await bot.lookAt(live.position.offset(0.5, 0.5, 0.5), true); } catch {}
+
+      try {
+        await race(bot.dig(live), maxMs);
+      } catch {
+        try { bot.stopDigging(); } catch {}
+        await sleep(120);
+        continue;
+      }
+
+      await sleep(60);
+      const after = bot.blockAt(block.position);
+      if (!after || after.name === 'air' || after.name === 'cave_air' || after.type === 0) return true;
+    }
+    return false;
+  } catch {
+    try { bot.stopDigging(); } catch {}
     return false;
   }
 }
 
 export async function digFrontWall(bot) {
-  try {
-    const look = bot.blockAtCursor?.(3.5);
-    if (look && look.boundingBox === 'block') {
-      return digBlock(bot, look);
+  if (!bot?.entity) return false;
+  const yaw = bot.entity.yaw;
+  const fx = Math.round(-Math.sin(yaw));
+  const fz = Math.round(-Math.cos(yaw));
+  const eye = bot.entity.position.offset(0, bot.entity.height * 0.85, 0);
+  const targets = [
+    bot.blockAt(eye.offset(fx, 0, fz)),
+    bot.blockAt(eye.offset(fx, -1, fz)),
+    bot.blockAt(bot.entity.position.offset(fx, 1, fz)),
+    bot.blockAt(bot.entity.position.offset(fx, 0, fz)),
+  ];
+  for (const b of targets) {
+    if (b && b.name !== 'air' && b.name !== 'cave_air' && !isUnbreakable(b.name)) {
+      if (await digBlock(bot, b)) return true;
     }
-    const yaw = bot.entity.yaw;
-    const dx = Math.round(-Math.sin(yaw));
-    const dz = Math.round(-Math.cos(yaw));
-    const p = bot.entity.position.floored();
-    for (const oy of [0, 1]) {
-      const b = bot.blockAt(p.offset(dx, oy, dz));
-      if (b && b.boundingBox === 'block') return digBlock(bot, b);
-    }
-  } catch {}
+  }
   return false;
 }
 
-export async function placeUnderFeet(bot) {
+export function scaffoldItem(bot) {
+  const pref = [/dirt/, /cobblestone/, /netherrack/, /planks/, /stone$/, /andesite/, /granite/, /diorite/, /tuff/];
+  const inv = bot.inventory.items();
+  for (const re of pref) {
+    const it = inv.find(i => re.test(i.name) && !/ore|ingot|sword|pick|axe|shovel|hoe/.test(i.name));
+    if (it) return it;
+  }
+  return null;
+}
+
+export async function placeAt(bot, against, faceVec) {
+  if (!bot?.entity || !against) return false;
   const item = scaffoldItem(bot);
-  if (!item || !bot.entity) return false;
+  if (!item) return false;
   try {
     await bot.equip(item, 'hand');
-    const ref = bot.blockAt(bot.entity.position.offset(0, -1, 0));
-    if (!ref || ref.name === 'air' || ref.name === 'water' || ref.name === 'lava') {
-      const yaw = bot.entity.yaw;
-      const dx = Math.round(-Math.sin(yaw));
-      const dz = Math.round(-Math.cos(yaw));
-      const side = bot.blockAt(bot.entity.position.offset(dx, -1, dz));
-      if (side && side.boundingBox === 'block') {
-        await bot.lookAt(side.position.offset(0.5, 1, 0.5), true);
-        bot.setControlState('sneak', true);
-        await sleep(50);
-        await race(bot.placeBlock(side, new Vec3(0, 1, 0)), 2000);
-        bot.setControlState('sneak', false);
-        return true;
-      }
-      return false;
-    }
-    await bot.lookAt(ref.position.offset(0.5, 1, 0.5), true);
-    bot.setControlState('sneak', true);
-    await sleep(40);
-    await race(bot.placeBlock(ref, new Vec3(0, 1, 0)), 2000);
-    bot.setControlState('sneak', false);
+    await bot.lookAt(against.position.offset(0.5 + faceVec.x * 0.5, 0.5 + faceVec.y * 0.5, 0.5 + faceVec.z * 0.5), true);
+    await race(bot.placeBlock(against, faceVec), 2500);
     return true;
+  } catch { return false; }
+}
+
+export async function placeUnderFeet(bot) {
+  if (!bot?.entity) return false;
+  const item = scaffoldItem(bot);
+  if (!item) return false;
+  try {
+    await bot.equip(item, 'hand');
+    const yaw = bot.entity.yaw;
+    const fx = Math.round(-Math.sin(yaw));
+    const fz = Math.round(-Math.cos(yaw));
+    const candidates = [
+      bot.blockAt(bot.entity.position.offset(0, -2, 0)),
+      bot.blockAt(bot.entity.position.offset(fx, -1, fz)),
+      bot.blockAt(bot.entity.position.offset(-fx, -1, -fz)),
+      bot.blockAt(bot.entity.position.offset(0, -1, 0)),
+    ].filter(Boolean);
+    bot.setControlState('sneak', true);
+    bot.setControlState('jump', true);
+    await sleep(80);
+    for (const against of candidates) {
+      if (!against || against.name === 'air' || against.name === 'water' || against.name === 'lava') continue;
+      try {
+        await bot.lookAt(against.position.offset(0.5, 1, 0.5), true);
+        await race(bot.placeBlock(against, new Vec3(0, 1, 0)), 2000);
+        bot.clearControlStates();
+        return true;
+      } catch {}
+    }
+    bot.clearControlStates();
+    return false;
   } catch {
-    try {
-      bot.setControlState('sneak', false);
-    } catch {}
+    try { bot.clearControlStates(); } catch {}
     return false;
   }
 }
 
 export async function placeFront(bot) {
+  if (!bot?.entity) return false;
   const item = scaffoldItem(bot);
-  if (!item || !bot.entity) return false;
+  if (!item) return false;
+  const yaw = bot.entity.yaw;
+  const fx = Math.round(-Math.sin(yaw));
+  const fz = Math.round(-Math.cos(yaw));
+  const feet = bot.blockAt(bot.entity.position.offset(0, -1, 0));
   try {
     await bot.equip(item, 'hand');
-    const yaw = bot.entity.yaw;
-    const dx = Math.round(-Math.sin(yaw));
-    const dz = Math.round(-Math.cos(yaw));
-    const feet = bot.entity.position.floored();
-    const edge = bot.blockAt(feet.offset(0, -1, 0));
-    if (!edge) return false;
     bot.setControlState('sneak', true);
-    await sleep(60);
-    await bot.lookAt(feet.offset(dx, 0, dz).offset(0.5, 0.5, 0.5), true);
-    try {
-      await race(bot.placeBlock(edge, new Vec3(dx, 0, dz)), 2500);
-    } catch {
-      try {
-        await race(bot.placeBlock(edge, new Vec3(0, 1, 0)), 2000);
-      } catch {}
+    await sleep(50);
+    if (feet && feet.name !== 'air' && feet.name !== 'water') {
+      await bot.lookAt(feet.position.offset(0.5 + fx * 0.5, 1, 0.5 + fz * 0.5), true);
+      await race(bot.placeBlock(feet, new Vec3(fx, 0, fz)), 2000);
+      bot.clearControlStates();
+      return true;
     }
-    bot.setControlState('sneak', false);
-    return true;
+    bot.clearControlStates();
+    return false;
   } catch {
-    try {
-      bot.setControlState('sneak', false);
-    } catch {}
+    try { bot.clearControlStates(); } catch {}
     return false;
   }
 }
 
 export async function bridgeForward(bot, steps = 3) {
-  if (!bot?.entity) return false;
-  const item = scaffoldItem(bot);
-  if (!item) return false;
-  let placed = 0;
+  let ok = 0;
   for (let i = 0; i < steps; i++) {
-    const ok = await placeFront(bot);
-    if (!ok) break;
-    placed++;
+    if (await placeFront(bot)) ok++;
     bot.setControlState('forward', true);
-    await sleep(180);
+    bot.setControlState('sprint', true);
+    await sleep(200);
     bot.clearControlStates();
+    await sleep(60);
   }
-  if (placed > 0) console.log('[PLACE] bridge', placed);
-  return placed > 0;
+  if (ok) console.log('[PLACE] bridge', ok);
+  return ok > 0;
 }
 
-export async function placeAt() {
-  return false;
+/** collectblock-style: path + dig + pickup */
+export async function collectNearby(bot, names, maxDist = 32) {
+  if (!bot?.entity) return false;
+  const set = new Set(Array.isArray(names) ? names : [names]);
+  const block = bot.findBlock({
+    matching: (b) => b && set.has(b.name),
+    maxDistance: maxDist,
+  });
+  if (!block) return false;
+
+  try {
+    if (bot.collectBlock?.collect) {
+      await race(bot.collectBlock.collect(block, { ignoreNoPath: true }), 45000);
+      console.log('[DIG] collectBlock', block.name);
+      return true;
+    }
+  } catch (e) {
+    console.warn('[DIG] collectBlock fail', (e.message || '').slice(0, 40));
+  }
+
+  try {
+    if (typeof bot.dreamGoto === 'function') {
+      await bot.dreamGoto(block.position.x, block.position.y, block.position.z, 2);
+    } else if (bot.pathfinder) {
+      const { goals } = require('mineflayer-pathfinder');
+      await race(bot.pathfinder.goto(new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2)), 25000);
+    }
+  } catch {}
+
+  const live = bot.blockAt(block.position);
+  if (live && live.name !== 'air') await digBlock(bot, live);
+
+  try {
+    const drops = Object.values(bot.entities).filter(e =>
+      e.name === 'item' && e.position.distanceTo(bot.entity.position) < 8
+    );
+    for (const d of drops.slice(0, 5)) {
+      try {
+        if (typeof bot.dreamGoto === 'function') await bot.dreamGoto(d.position.x, d.position.y, d.position.z, 1);
+      } catch {}
+    }
+  } catch {}
+  return true;
 }
