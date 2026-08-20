@@ -1,2 +1,2 @@
-DREAMBOT_BUILD=2026-08-20-PURE-v8-openness-scorer
-FIX=no random spin — chooseBestYaw samples directions and picks highest openness score
+DREAMBOT_BUILD=2026-08-20-PURE-v9-wallpush-kill
+FIX=when face blocked + low velocity → clear controls immediately, dig soft or score-turn, never keep pushing into wall

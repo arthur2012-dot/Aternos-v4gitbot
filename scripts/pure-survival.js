@@ -1,8 +1,8 @@
 /**
- * pure-survival v8 — Openness Scorer
- * Replaces random yaw with directional probing:
- * samples candidate headings, scores air/soft/hard ahead, picks best escape/explore vector.
- * Stable + intelligent, still non-mechanical.
+ * pure-survival v9 — Wall-Push Killer
+ * Bug: bot presses forward into solid block and freezes (clipping illusion).
+ * Fix: high-frequency face+velocity check → clear controls instantly,
+ * dig soft face or Openness Scorer turn. Never keep pushing into wall.
  */
 
 import pathfinderPkg from 'mineflayer-pathfinder';
@@ -118,32 +118,57 @@ async function stopNav(bot) {
   } catch {}
 }
 
+function horizontalSpeed(bot) {
+  try {
+    const v = bot.entity.velocity;
+    return Math.sqrt(v.x * v.x + v.z * v.z);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Robust face check — eye + chest + slight body probe.
+ * Catches the "pushing into block" case even when slightly off-center.
+ */
 function blockInFace(bot, yawOverride = null) {
   try {
     const p = bot.entity.position;
     const yaw = yawOverride != null ? yawOverride : bot.entity.yaw;
     const dx = -Math.sin(yaw);
     const dz = -Math.cos(yaw);
-    const eye = p.offset(dx * 0.85, 1.05, dz * 0.85);
-    const b = bot.blockAt(eye.floored());
-    if (b && b.boundingBox === 'block' && b.name !== 'air') return b;
-    const chest = bot.blockAt(p.offset(dx * 0.85, 0.55, dz * 0.85).floored());
-    if (chest && chest.boundingBox === 'block') return chest;
+
+    const probes = [
+      p.offset(dx * 0.7, 1.05, dz * 0.7),
+      p.offset(dx * 0.9, 0.6, dz * 0.9),
+      p.offset(dx * 0.55, 0.3, dz * 0.55),
+    ];
+
+    for (const pt of probes) {
+      const b = bot.blockAt(pt.floored());
+      if (b && b.boundingBox === 'block' && b.name !== 'air' && b.name !== 'cave_air') {
+        return b;
+      }
+    }
   } catch {}
   return null;
 }
 
-/**
- * Openness Scorer — innovative replacement for random yaw.
- * Samples candidate headings relative to current facing,
- * scores each by air / soft / hard blocks ahead + slight resource pull.
- * Returns the yaw with highest score.
- */
+function isPushingWall(bot) {
+  if (!bot?.entity) return false;
+  if (bot._digLocked || bot.targetDigBlock) return false;
+  const face = blockInFace(bot);
+  if (!face) return false;
+  const spd = horizontalSpeed(bot);
+  // low speed + solid in face = classic wall-push freeze
+  return spd < 0.08;
+}
+
 function chooseBestYaw(bot) {
   const base = bot.entity.yaw;
-  // relative offsets (radians): forward, slight L/R, 90°, 135°, back-bias last
-  const offsets = [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8, Math.PI * 0.9];
-  let bestYaw = base;
+  // skip pure forward (0) first when already blocked — start from sides
+  const offsets = [0.7, -0.7, 1.25, -1.25, 1.9, -1.9, Math.PI * 0.95, 0.35, -0.35];
+  let bestYaw = base + 1.2;
   let bestScore = -999;
 
   for (const off of offsets) {
@@ -154,43 +179,39 @@ function chooseBestYaw(bot) {
 
     for (let step = 1; step <= 3; step++) {
       const body = bot.blockAt(
-        bot.entity.position.offset(dx * step, 0.2, dz * step).floored()
+        bot.entity.position.offset(dx * step, 0.25, dz * step).floored()
       );
       const head = bot.blockAt(
-        bot.entity.position.offset(dx * step, 1.1, dz * step).floored()
+        bot.entity.position.offset(dx * step, 1.15, dz * step).floored()
       );
 
       const scoreBlock = (b) => {
-        if (!b || b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') return 12;
-        if (b.boundingBox !== 'block') return 8;
-        if (SOFT_FACE.test(b.name)) return 5; // diggable
-        if (/water|lava/.test(b.name)) return -4;
-        return -8; // hard wall
+        if (!b || b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') return 14;
+        if (b.boundingBox !== 'block') return 9;
+        if (SOFT_FACE.test(b.name)) return 4;
+        if (/water|lava/.test(b.name)) return -5;
+        return -10;
       };
 
       score += scoreBlock(body) * (4 - step);
       score += scoreBlock(head) * (4 - step);
     }
 
-    // tiny bonus if a log/ore is roughly in that direction (curiosity pull)
     try {
       const interest = bot.findBlock({
         matching: (b) =>
           b &&
           (WOOD_LOG.test(b.name) ||
             /(iron|coal|copper)_ore|deepslate_.*_ore/.test(b.name)),
-        maxDistance: 18,
+        maxDistance: 16,
       });
       if (interest) {
         const to = interest.position.offset(0.5, 0.5, 0.5).minus(bot.entity.position);
         const targetYaw = Math.atan2(-to.x, -to.z);
         let diff = Math.abs(((targetYaw - yaw + Math.PI) % (Math.PI * 2)) - Math.PI);
-        if (diff < 0.9) score += 6;
+        if (diff < 0.85) score += 5;
       }
     } catch {}
-
-    // prefer keeping some forward momentum
-    if (Math.abs(off) < 0.3) score += 3;
 
     if (score > bestScore) {
       bestScore = score;
@@ -201,8 +222,80 @@ function chooseBestYaw(bot) {
   return bestYaw;
 }
 
+/**
+ * Instant wall-push recovery — the core fix.
+ * 1) clear all movement
+ * 2) dig soft face if diggable
+ * 3) otherwise turn to best open yaw and step away
+ */
+async function breakWallPush(bot) {
+  if (bot._wallBreakBusy) return false;
+  bot._wallBreakBusy = true;
+  try {
+    console.log('[PURE] WALL-PUSH break');
+    await stopNav(bot);
+    try {
+      bot.stopDigging?.();
+    } catch {}
+
+    const face = blockInFace(bot);
+    if (face && SOFT_FACE.test(face.name)) {
+      try {
+        const tool =
+          findItem(bot, /_shovel/) ||
+          findItem(bot, /_pickaxe|_axe/) ||
+          findItem(bot, /./);
+        if (tool) await bot.equip(tool, 'hand');
+        await bot.lookAt(face.position.offset(0.5, 0.5, 0.5), true);
+        await race(bot.dig(face, true), 4500);
+        console.log('[PURE] dug blocking', face.name);
+        await sleep(80);
+        return true;
+      } catch {
+        try {
+          bot.stopDigging();
+        } catch {}
+      }
+    }
+
+    // hard wall or dig failed → turn to open space and step
+    const best = chooseBestYaw(bot);
+    try {
+      await bot.look(best, -0.05, true);
+    } catch {}
+
+    bot.setControlState('forward', true);
+    bot.setControlState('sprint', true);
+    bot.setControlState('jump', true);
+    await sleep(280);
+    bot.setControlState('jump', false);
+    await sleep(450);
+    bot.clearControlStates();
+
+    // if still blocked after turn, one more hard stop
+    if (isPushingWall(bot)) {
+      await stopNav(bot);
+      const alt = chooseBestYaw(bot);
+      try {
+        await bot.look(alt, 0, true);
+      } catch {}
+      bot.setControlState('back', true);
+      await sleep(200);
+      bot.clearControlStates();
+      bot.setControlState('forward', true);
+      bot.setControlState('jump', true);
+      await sleep(350);
+      bot.clearControlStates();
+    }
+
+    return true;
+  } finally {
+    bot._wallBreakBusy = false;
+  }
+}
+
 async function forceUnstuck(bot) {
-  console.log('[PURE] UNSTUCK (openness scorer)');
+  console.log('[PURE] UNSTUCK');
   await stopNav(bot);
 
   if (isTrappedFn && isTrappedFn(bot) && escapeHoleFn) {
@@ -214,22 +307,11 @@ async function forceUnstuck(bot) {
     }
   }
 
-  const face = blockInFace(bot);
-  if (face && SOFT_FACE.test(face.name)) {
-    try {
-      const shovel = findItem(bot, /_shovel/) || findItem(bot, /_pickaxe|_axe/);
-      if (shovel) await bot.equip(shovel, 'hand');
-      await bot.lookAt(face.position.offset(0.5, 0.5, 0.5), true);
-      await race(bot.dig(face, true), 5500);
-      console.log('[PURE] dug face', face.name);
-    } catch {
-      try {
-        bot.stopDigging();
-      } catch {}
-    }
+  // prioritize wall-push kill
+  if (isPushingWall(bot) || blockInFace(bot)) {
+    return await breakWallPush(bot);
   }
 
-  // innovative: pick best open direction instead of random spin
   const best = chooseBestYaw(bot);
   try {
     await bot.look(best, -0.1, true);
@@ -238,17 +320,10 @@ async function forceUnstuck(bot) {
   bot.setControlState('forward', true);
   bot.setControlState('sprint', true);
   bot.setControlState('jump', true);
-  await sleep(350);
+  await sleep(300);
   bot.setControlState('jump', false);
-  await sleep(1000);
-  if (bot.entity.onGround) {
-    bot.setControlState('jump', true);
-    await sleep(200);
-    bot.setControlState('jump', false);
-  }
-  await sleep(600);
+  await sleep(900);
   bot.clearControlStates();
-
   return true;
 }
 
@@ -257,19 +332,38 @@ async function walkRaw(bot, seconds = 2.4, yawOverride = null) {
   try {
     await bot.look(yaw, 0, true);
   } catch {}
+
+  // never start walking into a wall
+  if (blockInFace(bot, yaw)) {
+    await breakWallPush(bot);
+    return;
+  }
+
   bot.setControlState('forward', true);
   bot.setControlState('sprint', true);
   const end = Date.now() + seconds * 1000;
+
   while (Date.now() < end) {
-    if (blockInFace(bot)) {
-      bot.setControlState('jump', true);
-      await sleep(160);
-      bot.setControlState('jump', false);
-      const f = blockInFace(bot);
-      if (f && SOFT_FACE.test(f.name)) {
+    // CRITICAL: if pushing wall, abort forward immediately
+    if (isPushingWall(bot) || (blockInFace(bot) && horizontalSpeed(bot) < 0.12)) {
+      bot.clearControlStates();
+      await breakWallPush(bot);
+      // resume briefly in new direction
+      bot.setControlState('forward', true);
+      bot.setControlState('sprint', true);
+      await sleep(300);
+      continue;
+    }
+
+    const f = blockInFace(bot);
+    if (f) {
+      if (SOFT_FACE.test(f.name)) {
         bot.clearControlStates();
         try {
-          await race(bot.dig(f, true), 3800);
+          const tool = findItem(bot, /_shovel|_pickaxe|_axe/);
+          if (tool) await bot.equip(tool, 'hand');
+          await bot.lookAt(f.position.offset(0.5, 0.5, 0.5), true);
+          await race(bot.dig(f, true), 3500);
         } catch {
           try {
             bot.stopDigging();
@@ -278,19 +372,22 @@ async function walkRaw(bot, seconds = 2.4, yawOverride = null) {
         bot.setControlState('forward', true);
         bot.setControlState('sprint', true);
       } else {
-        // re-score mid-walk if hard wall
+        bot.clearControlStates();
         const better = chooseBestYaw(bot);
         try {
           await bot.look(better, 0, true);
         } catch {}
+        bot.setControlState('forward', true);
+        bot.setControlState('sprint', true);
       }
     }
-    if (Math.random() < 0.1 && bot.entity.onGround) {
+
+    if (bot.entity.onGround && Math.random() < 0.08) {
       bot.setControlState('jump', true);
-      await sleep(140);
+      await sleep(120);
       bot.setControlState('jump', false);
     }
-    await sleep(200);
+    await sleep(160);
   }
   bot.clearControlStates();
 }
@@ -298,19 +395,22 @@ async function walkRaw(bot, seconds = 2.4, yawOverride = null) {
 async function gotoNear(bot, x, y, z, range = 2) {
   const start = bot.entity.position.clone();
   try {
-    await race(bot.pathfinder.goto(new pfGoals.GoalNear(x, y, z, range)), 9000);
+    await race(bot.pathfinder.goto(new pfGoals.GoalNear(x, y, z, range)), 8500);
     return true;
   } catch {
     await stopNav(bot);
+    if (isPushingWall(bot)) {
+      await breakWallPush(bot);
+    }
     const dx = x - bot.entity.position.x;
     const dz = z - bot.entity.position.z;
     const yaw = Math.atan2(-dx, -dz);
     try {
       await bot.look(yaw, 0, true);
     } catch {}
-    await walkRaw(bot, 2.3, yaw);
+    await walkRaw(bot, 2.2, yaw);
     const moved = bot.entity.position.distanceTo(start);
-    if (moved < 1.1) await forceUnstuck(bot);
+    if (moved < 1.0) await forceUnstuck(bot);
     return false;
   }
 }
@@ -342,7 +442,7 @@ async function doFight(bot, entity) {
     const sword = findItem(bot, /sword|_axe$/);
     if (sword) await bot.equip(sword, 'hand');
     bot.pvp.attack(entity);
-    await sleep(750);
+    await sleep(700);
     return true;
   } catch {
     return false;
@@ -365,7 +465,7 @@ async function digBlock(bot, block) {
       if (tool) await bot.equip(tool, 'hand');
     }
     await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
-    await race(bot.dig(block, true), 9500);
+    await race(bot.dig(block, true), 9000);
     console.log('[PURE] dug', block.name);
     return true;
   } catch (e) {
@@ -389,7 +489,7 @@ async function doCollect(bot, block) {
 
     if (bot.collectBlock?.collect) {
       try {
-        await race(bot.collectBlock.collect(block), 11000);
+        await race(bot.collectBlock.collect(block), 10000);
         console.log('[PURE] collectBlock', block.name);
         return true;
       } catch (e) {
@@ -405,7 +505,7 @@ async function doCollect(bot, block) {
       if (dug) return true;
     }
 
-    if (bot.entity.position.distanceTo(start) < 1.4) {
+    if (bot.entity.position.distanceTo(start) < 1.3 || isPushingWall(bot)) {
       await forceUnstuck(bot);
     }
     return false;
@@ -501,10 +601,8 @@ function getStage(bot) {
 }
 
 async function runStage(bot, stage) {
-  // occasional smart wander (uses Openness Scorer, not random spin)
-  if (stage !== 'explore' && Math.random() < 0.07) {
-    console.log('[PURE] soft wander (scored direction)');
-    await walkRaw(bot, 2.1);
+  if (stage !== 'explore' && Math.random() < 0.06) {
+    await walkRaw(bot, 2.0);
     return true;
   }
 
@@ -520,8 +618,7 @@ async function runStage(bot, stage) {
         console.log('[PURE] target log', log.name);
         return await doCollect(bot, log);
       }
-      console.log('[PURE] no log nearby — scored walk');
-      await walkRaw(bot, 2.9);
+      await walkRaw(bot, 2.8);
       return true;
     }
     case 'planks': {
@@ -552,7 +649,7 @@ async function runStage(bot, stage) {
         maxDistance: 32,
       });
       if (stone) return await doCollect(bot, stone);
-      await walkRaw(bot, 2.4);
+      await walkRaw(bot, 2.3);
       return true;
     }
     case 'stone_pick':
@@ -563,7 +660,7 @@ async function runStage(bot, stage) {
       );
     case 'explore': {
       const hasPick = !!findItem(bot, /_pickaxe/);
-      if (hasPick && Math.random() < 0.55) {
+      if (hasPick && Math.random() < 0.5) {
         const ore = bot.findBlock({
           matching: (b) =>
             b && /(iron|coal|copper|gold|diamond)_ore|deepslate_.*_ore/.test(b.name),
@@ -571,7 +668,7 @@ async function runStage(bot, stage) {
         });
         if (ore) return await doCollect(bot, ore);
       }
-      await walkRaw(bot, 2.8);
+      await walkRaw(bot, 2.7);
       return true;
     }
     default:
@@ -600,19 +697,41 @@ export function startPureSurvival(agent) {
   let lastPos = null;
   let stillSince = Date.now();
   let lastDecision = 0;
-  const DECISION_MS = 850;
+  const DECISION_MS = 800;
+
+  // High-frequency wall-push watchdog (independent of main loop)
+  const wallWatch = setInterval(async () => {
+    try {
+      if (!bot.entity || busy || bot._wallBreakBusy || bot._dreamPvpActive) return;
+      if (bot._digLocked || bot.targetDigBlock) return;
+      if (isPushingWall(bot)) {
+        busy = true;
+        bot._dreamBusy = true;
+        try {
+          await breakWallPush(bot);
+        } finally {
+          busy = false;
+          bot._dreamBusy = false;
+          stillSince = Date.now();
+          if (bot.entity) lastPos = bot.entity.position.clone();
+        }
+      }
+    } catch {}
+  }, 400);
 
   async function runOnce() {
     if (busy) return;
     if (!bot.entity) return;
-    if (!isPlayable(bot)) {
-      console.log('[PURE] not playable');
-      return;
-    }
+    if (!isPlayable(bot)) return;
 
     const pos = bot.entity.position;
-    if (lastPos && pos.distanceTo(lastPos) < 0.35) {
-      if (Date.now() - stillSince > 2800) {
+
+    // faster still trigger when face is blocked
+    const faceBlocked = !!blockInFace(bot);
+    const stillLimit = faceBlocked ? 900 : 2600;
+
+    if (lastPos && pos.distanceTo(lastPos) < 0.3) {
+      if (Date.now() - stillSince > stillLimit) {
         busy = true;
         bot._dreamBusy = true;
         try {
@@ -628,6 +747,19 @@ export function startPureSurvival(agent) {
     } else {
       lastPos = pos.clone();
       stillSince = Date.now();
+    }
+
+    // opportunistic wall check before any stage work
+    if (isPushingWall(bot)) {
+      busy = true;
+      bot._dreamBusy = true;
+      try {
+        await breakWallPush(bot);
+      } finally {
+        busy = false;
+        bot._dreamBusy = false;
+      }
+      return;
     }
 
     busy = true;
@@ -673,8 +805,11 @@ export function startPureSurvival(agent) {
     runOnce().catch(() => {});
   }, DECISION_MS);
 
-  bot.once('end', () => clearInterval(timer));
-  setTimeout(() => runOnce().catch(() => {}), 1400);
+  bot.once('end', () => {
+    clearInterval(timer);
+    clearInterval(wallWatch);
+  });
+  setTimeout(() => runOnce().catch(() => {}), 1200);
 
   bot.on('chat', (username, message) => {
     if (username === bot.username) return;
@@ -699,5 +834,5 @@ export function startPureSurvival(agent) {
     }
   });
 
-  console.log('[PURE] v8 ON — Openness Scorer (no random spin)');
+  console.log('[PURE] v9 ON — wall-push killer + openness scorer');
 }
